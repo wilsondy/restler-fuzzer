@@ -263,6 +263,12 @@ class Request(object):
             var_name = self._get_var_name_from_definition_line(line)
             if var_name:
                 self._consumes.add(var_name)
+        # Also look for reader placeholders in the pre_send section
+        if bool(self.metadata) and 'pre_send' in self.metadata\
+        and 'dependencies' in self.metadata['pre_send']:
+            for reader_var in self.metadata['pre_send']['dependencies']:
+                var_name = reader_var.split(dependencies.RDELIM)[1]
+                self._consumes.add(var_name)
 
         # Look for writer placeholders
         if bool(self.metadata) and 'post_send' in self.metadata\
@@ -562,6 +568,22 @@ class Request(object):
                 pass
         return -1
 
+    def get_basepath_index(self):
+        """ Gets the index of the basepath custom payload line, if it exists in the grammar.
+
+        @return: The index of the basepath parameter or -1 if not found
+        @rtype : Int
+
+        """
+        for i, line in enumerate(self._definition):
+            try:
+                if line[0] == "restler_basepath":
+                    return i
+            except:
+                # ignore line parsing exceptions
+                pass
+        return -1
+
     def update_host(self):
         """ Updates the Host field for every request with the one specified in Settings
 
@@ -579,6 +601,24 @@ class Request(object):
             if header_idx < 0:
                 raise InvalidGrammarException
             self._definition.insert(header_idx, new_host_line)
+
+    def update_basepath(self):
+        """ Updates the basepath custom payload for every request with the one specified in Settings
+
+        @return: None
+        @rtype : None
+
+        """
+        basepath_idx = self.get_basepath_index()
+        if basepath_idx >= 0:
+            basepath = self._definition[basepath_idx][1]
+            if Settings().basepath is not None:
+                basepath = Settings().basepath
+            self._definition[basepath_idx] = primitives.restler_static_string(basepath)
+        else:
+            # No basepath custom payload in the grammar - this is possible for older grammar versions.
+            # Do nothing
+            pass
 
     def header_start_index(self):
         """ Gets the index of the first header line in the definition
@@ -634,8 +674,19 @@ class Request(object):
             yield self
 
     def init_fuzzable_values(self, req_definition, candidate_values_pool, preprocessing=False):
+        def _raise_dict_err(type, tag):
+            logger.write_to_main(
+                f"Error for request {self.method} {self.endpoint_no_dynamic_objects}.\n"
+                f"{type} exception: {tag} not found.\n"
+                "Make sure you are using the dictionary created during compilation.",
+                print_to_console=True
+            )
+            raise InvalidDictionaryException
 
         fuzzable = []
+        # The following list will contain tuples of (writer_variable, is_quoted)
+        # for each value that should be written to a corresponding writer variable.
+        writer_variables=[]
         # The following list will contain name-value pairs of properties whose combinations
         # are tracked for coverage reporting purposes.
         # First, in the loop below, the index of the property in the values list will be added.
@@ -645,11 +696,14 @@ class Request(object):
 
         for request_block in req_definition:
             primitive_type = request_block[0]
+            writer_variable = None
+
             if primitive_type == primitives.FUZZABLE_GROUP:
                 field_name = request_block[1]
                 default_val = request_block[2]
                 quoted = request_block[3]
                 examples = request_block[4]
+                writer_variable = (request_block[6], quoted)
             elif primitive_type in [ primitives.CUSTOM_PAYLOAD,
                                      primitives.CUSTOM_PAYLOAD_HEADER,
                                      primitives.CUSTOM_PAYLOAD_QUERY,
@@ -657,19 +711,21 @@ class Request(object):
                 field_name = request_block[1]
                 quoted = request_block[2]
                 examples = request_block[3]
+                writer_variable = (request_block[5], quoted)
             else:
                 default_val = request_block[1]
                 quoted = request_block[2]
                 examples = request_block[3]
                 field_name = request_block[4]
+                writer_variable = (request_block[5], quoted)
 
             values = []
             # Handling dynamic primitives that need fresh rendering every time
             if primitive_type == primitives.FUZZABLE_UUID4:
                 if quoted:
-                    values = [(primitives.restler_fuzzable_uuid4, True)]
+                    values = [(primitives.restler_fuzzable_uuid4, True, writer_variable)]
                 else:
-                    values = [(primitives.restler_fuzzable_uuid4, False)]
+                    values = [(primitives.restler_fuzzable_uuid4, False, writer_variable)]
             # Handle enums that have a list of values instead of one default val
             elif primitive_type == primitives.FUZZABLE_GROUP:
                 if quoted:
@@ -712,6 +768,7 @@ class Request(object):
                     _raise_dict_err(primitive_type, field_name)
                 except Exception as err:
                     _handle_exception(primitive_type, field_name, err)
+
             # Handle custom (user defined) static payload on header or query
             elif (primitive_type == primitives.CUSTOM_PAYLOAD_HEADER or\
                   primitive_type == primitives.CUSTOM_PAYLOAD_QUERY):
@@ -727,6 +784,7 @@ class Request(object):
                     _raise_dict_err(primitive_type, field_name)
                 except Exception as err:
                     _handle_exception(primitive_type, field_name, err)
+
             # Handle custom (user defined) static payload with uuid4 suffix
             elif primitive_type == primitives.CUSTOM_PAYLOAD_UUID4_SUFFIX:
                 try:
@@ -772,8 +830,9 @@ class Request(object):
                     tracked_parameters[field_name].append(param_idx)
 
             fuzzable.append(values)
+            writer_variables.append(writer_variable)
 
-        return fuzzable, tracked_parameters
+        return fuzzable, writer_variables, tracked_parameters
 
     def render_iter(self, candidate_values_pool, skip=0, preprocessing=False):
         """ This is the core method that renders values combinations in a
@@ -799,15 +858,6 @@ class Request(object):
         @rtype : (Str, Function Pointer, List[Str])
 
         """
-        def _raise_dict_err(type, tag):
-            logger.write_to_main(
-                f"Error for request {self.method} {self.endpoint_no_dynamic_objects}.\n"
-                f"{type} exception: {tag} not found.\n"
-                "Make sure you are using the dictionary created during compilation.",
-                print_to_console=True
-            )
-            raise InvalidDictionaryException
-
         def _handle_exception(type, tag, err):
             logger.write_to_main(
                 f"Exception when rendering request {self.method} {self.endpoint_no_dynamic_objects}.\n"
@@ -838,7 +888,7 @@ class Request(object):
             and 'parser' in self.metadata['post_send']:
                 parser = self.metadata['post_send']['parser']
 
-            fuzzable, tracked_parameters = self.init_fuzzable_values(req.definition, candidate_values_pool, preprocessing)
+            fuzzable, writer_variables, tracked_parameters = self.init_fuzzable_values(req.definition, candidate_values_pool, preprocessing)
 
             # lazy generation of pool for candidate values
             combinations_pool = itertools.product(*fuzzable)
@@ -862,6 +912,14 @@ class Request(object):
             for ind, values in enumerate(combinations_pool):
                 values = list(values)
                 values = request_utilities.resolve_dynamic_primitives(values, candidate_values_pool)
+                for val_idx, val in enumerate(values):
+                    (writer_variable, writer_is_quoted) = writer_variables[val_idx]
+                    if writer_variable is not None:
+                        # Save the unquoted value.
+                        # It will be quoted again at the time it is used, if needed
+                        if writer_is_quoted:
+                            val = val[1:-1]
+                        dependencies.set_variable(writer_variable, val)
 
                 tracked_parameter_values = {}
                 for (k, idx_list) in tracked_parameters.items():
@@ -978,13 +1036,21 @@ class Request(object):
         # These special headers are not fuzzed, and should not be replaced
         skipped_headers_str = ["Accept", "Host", "Content-Type"]
         required_header_blocks = []
+        append_header = False
         for line in old_request.definition[header_start_index : header_end_index]:
             if line[0] == "restler_refreshable_authentication_token":
                 required_header_blocks.append(line)
                 continue
+            if append_header:
+                required_header_blocks.append(line)
+                if line[1].endswith("\r\n"):
+                    append_header = False
             for str in skipped_headers_str:
                 if line[1].startswith(str):
                     required_header_blocks.append(line)
+                    if not line[1].endswith("\r\n"):
+                        # Continue to append
+                        append_header = True
 
         # Make sure there is still a delimiter between headers and the remainder of the payload
         new_header_blocks.append(primitives.restler_static_string("\r\n"))
@@ -1283,6 +1349,17 @@ class RequestCollection(object):
         """
         for req in self._requests:
             req.update_host()
+
+
+    def update_basepaths(self):
+        """ Updates the basepaths in each request of the grammar file
+
+        @return: None
+        @rtype : None
+
+        """
+        for req in self._requests:
+            req.update_basepath()
 
     def get_host_from_grammar(self):
         """ Gets the hostname from the grammar

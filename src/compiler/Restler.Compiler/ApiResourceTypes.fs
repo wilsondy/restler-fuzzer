@@ -321,6 +321,13 @@ type BodyPayloadInputProducer =
         id : ApiResource
     }
 
+
+type OrderingConstraintProducer =
+    {
+        /// The request ID of the source request
+        requestId : RequestId
+    }
+
 /// A producer in the request that is not returned in the response
 /// Example: unique ID specified by a user.
 type InputOnlyProducer =
@@ -365,7 +372,12 @@ type Producer =
     /// Currently, only assigning such values from the dictionary is supported.
     /// The dictionary payload is an option type because it is only present when
     /// the initial payload is being generated.
-    | InputParameter of InputOnlyProducer * DictionaryPayload option
+    /// (producer, dictionary payload, isWriter)
+    /// When 'isWriter' is true, this is a writer variable that should be generated
+    /// with the original payload.
+    | InputParameter of InputOnlyProducer * DictionaryPayload option * bool
+
+    | OrderingConstraintParameter of OrderingConstraintProducer
 
 type ProducerConsumerDependency =
     {

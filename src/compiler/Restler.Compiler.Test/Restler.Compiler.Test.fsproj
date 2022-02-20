@@ -15,11 +15,22 @@
     <Compile Include="ExampleTests.fs" />
     <Compile Include="ReferencesTests.fs" />
     <Compile Include="SchemaTests.fs" />
+    <Compile Include="JsonGrammarTests.fs" />
     <Compile Include="RealWorldTests.fs" />
     <Content Include="packages.lock.json" />
     <Content Include="swagger\example_config_file.json">
       <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
     </Content>
+    <Content Include="swagger\exactCopy\array_example.json">
+      <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
+    </Content>
+    <Content Include="swagger\exactCopy\examples.json">
+      <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
+    </Content>
+    <Content Include="swagger\exactCopy\make_order_post.json">
+      <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
+    </Content>
+
     <Content Include="baselines\dependencyTests\path_annotation_grammar.py">
       <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
     </Content>
@@ -27,6 +38,15 @@
       <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
     </Content>
     <Content Include="baselines\schemaTests\xMsPaths_grammar.json">
+      <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
+    </Content>
+    <Content Include="baselines\grammarTests\required_params_grammar.json">
+      <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
+    </Content>
+    <Content Include="baselines\grammarTests\required_params_grammar.py">
+      <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
+    </Content>
+    <Content Include="baselines\grammarTests\required_params_grammar_requiredOnly.py">
       <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
     </Content>
     <Content Include="baselines\dictionaryTests\quoted_primitives_grammar.py">
@@ -41,6 +61,12 @@
     <Content Include="baselines\dependencyTests\header_response_writer_grammar.py">
       <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
     </Content>
+    <Content Include="baselines\dependencyTests\header_deps_grammar.py">
+      <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
+    </Content>
+    <Content Include="baselines\dependencyTests\ordering_test_grammar.py">
+      <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
+    </Content>
     <Content Include="baselines\dependencyTests\header_response_writer_annotation_grammar.py">
       <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
     </Content>
@@ -48,6 +74,9 @@
       <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
     </Content>
     <Content Include="swagger\dependencyTests\input_producer_spec.json">
+      <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
+    </Content>
+    <Content Include="swagger\dependencyTests\input_producer_dict.json">
       <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
     </Content>
     <Content Include="swagger\dependencyTests\input_producer_annotations.json">
@@ -70,6 +99,15 @@
     </Content>
     <Content Include="swagger\configTests\maindict.json">
     <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
+    </Content>
+    <Content Include="swagger\configTests\exampleConfigTestPut.json">
+      <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
+    </Content>
+    <Content Include="swagger\configTests\exampleConfigTestConfig1.json">
+      <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
+    </Content>
+    <Content Include="swagger\configTests\exampleConfigTestConfig2.json">
+      <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
     </Content>
     <Content Include="swagger\configTests\restlerEngineSettings.json">
       <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
@@ -104,10 +142,16 @@
     <Content Include="swagger\dictionaryTests\dict.json">
       <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
     </Content>
+    <Content Include="swagger\schemaTests\swagger_escape_characters.json">
+	  <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
+	</Content>
     <Content Include="swagger\schemaTests\requiredHeader.yml">
       <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
     </Content>
     <Content Include="swagger\schemaTests\xMsPaths.json">
+      <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
+    </Content>
+    <Content Include="swagger\grammarTests\required_params.json">
       <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
     </Content>
     <Content Include="swagger\schemaTests\global_path_parameters.json">
@@ -116,6 +160,13 @@
     <Content Include="swagger\schemaTests\xMsPaths_dict.json">
       <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
     </Content>
+    <Content Include="swagger\schemaTests\large_json_body.json">
+      <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
+    </Content>
+    <Content Include="swagger\schemaTests\openapi3_requestbody.json">
+      <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
+    </Content>
+
     <Content Include="swagger\schemaTests\xMsPaths_annotations.json">
       <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
     </Content>
@@ -135,6 +186,18 @@
       <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
     </Content>
     <Content Include="swagger\DependencyTests\response_headers_annotations.json">
+      <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
+    </Content>
+    <Content Include="swagger\DependencyTests\header_deps.json">
+      <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
+    </Content>
+    <Content Include="swagger\DependencyTests\ordering_test.json">
+      <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
+    </Content>
+    <Content Include="swagger\DependencyTests\ordering_test_annotations.json">
+      <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
+    </Content>
+    <Content Include="swagger\DependencyTests\header_deps_annotations.json">
       <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
     </Content>
     <Content Include="swagger\DependencyTests\inconsistent_casing_paths.json">
@@ -190,6 +253,9 @@
       <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
     </Content>
     <Content Include="swagger\referencesTests\circular_array.json">
+      <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
+    </Content>
+    <Content Include="swagger\referencesTests\circular_path.json">
       <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
     </Content>
     <Content Include="swagger\referencesTests\multiple_circular_paths.json">

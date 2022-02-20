@@ -70,16 +70,8 @@ def execute_token_refresh_cmd(cmd):
                 cmd_result = subprocess.getoutput(str(cmd).split(' '))
             else:
                 cmd_result = subprocess.getoutput([cmd])
-            metadata = cmd_result.split("\n")[0]
-            if not metadata:
-                raise EmptyTokenException
-            metadata = ast.literal_eval(metadata)
-            latest_token_value = cmd_result.split("\n")[1].strip('\r') + "\r\n"
-            if not latest_token_value:
-                raise EmptyTokenException
-            n_apps = len(metadata.keys())
-            if n_apps == 2:
-                latest_shadow_token_value = cmd_result.split("\n")[2].strip('\r') + "\r\n"
+
+            _, latest_token_value, latest_shadow_token_value = parse_authentication_tokens(cmd_result)
             _RAW_LOGGING(f"New value: {cmd_result}")
             break
         except subprocess.CalledProcessError:
@@ -104,6 +96,56 @@ def execute_token_refresh_cmd(cmd):
         _RAW_LOGGING(f"\nMaximum number of retries ({MAX_RETRIES}) exceeded. Exiting program.")
         sys.exit(-1)
 
+def parse_authentication_tokens(cmd_result):
+    """ Parses the output @param cmd_result from token scripts to refresh tokens.
+
+    Format:
+    {u'app1': {}, u'app2':{}}  // Metadata
+    ApiTokenTag: 9A            // Auth header for application 1
+    ApiTokenTag: ZQ            // Auth header for application 2
+
+    Format for multiple authenication headers per request:
+    {u'app1': {}, u'app2':{}}  // Metadata
+    ApiTokenTag: 9A            // Auth header for application 1
+    ApiTokenTag2: E8           // Auth header for application 1
+    ---                        // Delimiter
+    ApiTokenTag: ZQ            // Auth header for application 2
+    ApiTokenTag2: UI           // Auth header for application 2
+
+    @param cmd_result: The result of the user-provided command to refresh the token.
+    @type  cmd_result: Str
+
+    @return: Metadata, token values and shadow token values
+    @rtype : Tuple[Dict, Str, Str]
+
+    """
+    token_value = NO_TOKEN_SPECIFIED
+    shadow_token_value = NO_SHADOW_TOKEN_SPECIFIED
+    DELIMITER = '---'
+
+    metadata = cmd_result.split("\n")[0]
+    if not metadata:
+        raise EmptyTokenException
+    metadata = ast.literal_eval(metadata)
+
+    n_apps = len(metadata.keys())
+    tokens = [line.strip() for line in cmd_result.strip().split('\n')[1:]]
+
+    if n_apps == 1 and DELIMITER not in tokens:
+        token_value = '\r\n'.join(tokens) + '\r\n'
+    elif n_apps == 2 and DELIMITER not in tokens:
+        token_value = tokens[0] + '\r\n'
+        shadow_token_value = tokens[1] + '\r\n'
+    else:
+        token_value = '\r\n'.join(tokens[:tokens.index(DELIMITER)]) + '\r\n'
+        if n_apps == 2:
+            shadow_token_value = '\r\n'.join(tokens[tokens.index(DELIMITER)+1:]) + '\r\n'
+
+    if not latest_token_value:
+        raise EmptyTokenException
+
+    return metadata, token_value, shadow_token_value
+
 def replace_auth_token(data, replace_str):
     """ Replaces any authentication tokens from a data string with a
     specified @replace_str and returns the new data
@@ -119,10 +161,11 @@ def replace_auth_token(data, replace_str):
     """
     if data:
         if latest_token_value:
-            data = data.replace(latest_token_value.split('\r\n')[0], replace_str)
+            data = data.replace(latest_token_value.strip('\r\n'), replace_str)
         if latest_shadow_token_value:
-            data = data.replace(latest_shadow_token_value.split('\r\n')[0], replace_str)
+            data = data.replace(latest_shadow_token_value.strip('\r\n'), replace_str)
     return data
+
 
 def resolve_dynamic_primitives(values, candidate_values_pool):
     """ Dynamic primitives (i.e., uuid4) must be filled with a new value
@@ -150,12 +193,19 @@ def resolve_dynamic_primitives(values, candidate_values_pool):
         # Look for function pointers assigned to dynamic primitives
         if isinstance(values[i], tuple)\
         and values[i][0] == primitives.restler_fuzzable_uuid4:
-            val = uuid.uuid4().hex
+            val = f'{uuid.uuid4()}'
             quoted = values[i][1]
+            writer_variable = values[i][2]
+
             if quoted:
                 values[i] = f'"{val}"'
             else:
                 values[i] = val
+            ## Check if a writer is present.  If so, assign the value generated above
+            ## to the dynamic object variable.
+            if writer_variable is not None:
+                dependencies.set_variable(writer_variable, values[i])
+
         elif isinstance(values[i], tuple)\
         and values[i][0] == primitives.CUSTOM_PAYLOAD_UUID4_SUFFIX:
             current_uuid_type_name = values[i][1]
@@ -208,9 +258,17 @@ def send_request_data(rendered_data):
     # Set max retries and retry sleep time to be used in case
     # a status code from the retry list is encountered.
     MAX_RETRIES = 5
-    RETRY_SLEEP_SEC = 5
-    RETRY_CODES = ['409', '429']
+    custom_retry_codes = Settings().custom_retry_codes
+    custom_retry_text = Settings().custom_retry_text
+    custom_retry_interval_sec = Settings().custom_retry_interval_sec
 
+    RETRY_SLEEP_SEC = 5 if custom_retry_interval_sec is None else custom_retry_interval_sec
+    RETRY_CODES = ['429'] if custom_retry_codes is None else custom_retry_codes
+    # Note: the default text below is specific to Azure cloud services
+    # Because 409s were previously unconditionally re-tries, it is being added here
+    # as a constant for backwards compatibility.  In the future, this should move into
+    # a separate settings file.
+    RETRY_TEXT = ['AnotherOperationInProgress'] if custom_retry_text is None else custom_retry_text
     num_retries = 0
     while num_retries < MAX_RETRIES:
         try:
@@ -233,10 +291,17 @@ def send_request_data(rendered_data):
             _RAW_LOGGING(response.to_str)
             return HttpResponse()
 
-        if status_code in RETRY_CODES:
-            time.sleep(RETRY_SLEEP_SEC)
+        # Check whether a custom re-try text was provided.
+        response_contains_retry_text = False
+        for text in RETRY_TEXT:
+            if text in response.to_str:
+                response_contains_retry_text = True
+                break
+
+        if status_code in RETRY_CODES or response_contains_retry_text:
             num_retries += 1
             if num_retries < MAX_RETRIES:
+                time.sleep(RETRY_SLEEP_SEC)
                 _RAW_LOGGING("Retrying request")
                 continue
             else:
@@ -244,7 +309,7 @@ def send_request_data(rendered_data):
 
         return response
 
-def call_response_parser(parser, response, request=None):
+def call_response_parser(parser, response, request=None, responses=None):
     """ Calls a specified parser on a response
 
     @param parser: The parser function to calls
@@ -253,6 +318,9 @@ def call_response_parser(parser, response, request=None):
     @type  response: HttpResponse
     @param request: The request whose parser is being called
     @type  request: Request (None ok)
+    @param responses: A list of responses
+                     This parameter is used if the response is not specified
+    @type  responses: List[HttpResponse]
 
     @return False if there was a parser exception
     @rtype  Boolean
@@ -260,27 +328,36 @@ def call_response_parser(parser, response, request=None):
     """
     from utils.logger import write_to_main
     # parse response and set dependent variables (for garbage collector)
-    try:
-        if parser:
-            # For backwards compatibility, check if the parser accepts named arguments.
-            # If not, this is an older grammar that only supports a json body as the argument
-            import inspect
-            args, varargs, varkw, defaults = inspect.getargspec(parser)
-            if varkw=='kwargs':
-                parser(response.json_body, headers=response.headers_dict)
-            else:
-                parser(response.json_body)
-            # Check request's producers to verify dynamic objects were set
-            if request:
-                for producer in request.produces:
-                    if dependencies.get_variable(producer) == 'None':
-                        err_str = f'Failed to parse {producer}; it is now set to None.'
-                        write_to_main(err_str)
-                        _RAW_LOGGING(err_str)
-    except (ResponseParsingException, AttributeError) as error:
-        _RAW_LOGGING(str(error))
-        return False
-    return True
+
+    if responses is None:
+        responses = []
+        responses.append(response)
+
+    for response in responses:
+        try:
+            if parser:
+                # For backwards compatibility, check if the parser accepts named arguments.
+                # If not, this is an older grammar that only supports a json body as the argument
+                import inspect
+                args, varargs, varkw, defaults = inspect.getargspec(parser)
+
+                if varkw=='kwargs':
+                    parser(response.json_body, headers=response.headers_dict)
+                else:
+                    parser(response.json_body)
+                # Print a diagnostic message if some dynamic objects were not set.
+                # The parser only fails if all of the objects were not set.
+                if request:
+                    for producer in request.produces:
+                        if dependencies.get_variable(producer) == 'None':
+                            err_str = f'Failed to parse {producer}; it is now set to None.'
+                            write_to_main(err_str)
+                            _RAW_LOGGING(err_str)
+                return True
+        except (ResponseParsingException, AttributeError) as error:
+            _RAW_LOGGING(str(error))
+
+    return False
 
 def get_hostname_from_line(line):
     """ Gets the hostname from a request definition's Host: line

@@ -473,6 +473,39 @@ module Examples =
             Assert.True(grammar.Contains("primitives.restler_fuzzable_string(\"fuzzstring\", quoted=False, examples=[\"inline_example_value_laptop1\"]),"))
 
             Assert.True(grammar.Contains("primitives.restler_fuzzable_string(\"fuzzstring\", quoted=False, examples=[\"inline_ex_2\"]),"))
+            Assert.True(grammar.Contains("primitives.restler_fuzzable_string(\"fuzzstring\", quoted=False, examples=[None]),"))
+
             Assert.True(grammar.Contains("primitives.restler_fuzzable_number(\"1.23\", examples=[\"1.67\"]),"))
+
+        /// Test that 'exactCopy' does not add extra quotes
+        [<Fact>]
+        let ``exactCopy values are correct`` () =
+            let grammarOutputDirectoryPath = ctx.testRootDirPath
+            let config = { Restler.Config.SampleConfig with
+                             IncludeOptionalParameters = true
+                             GrammarOutputDirectoryPath = Some grammarOutputDirectoryPath
+                             ResolveBodyDependencies = false
+                             UseBodyExamples = Some true
+                             UseQueryExamples = Some true
+                             DataFuzzing = true
+                             SwaggerSpecFilePath = Some [(Path.Combine(Environment.CurrentDirectory, @"swagger\exactCopy\array_example.json"))]
+                         }
+
+            let exampleConfigFile = {
+                filePath = Path.Combine(Environment.CurrentDirectory, @"swagger\exactCopy\examples.json")
+                exactCopy = true
+            }
+
+            let testConfig = { config with ExampleConfigFiles = Some [ {exampleConfigFile with exactCopy = false }] }
+            Restler.Workflow.generateRestlerGrammar None testConfig
+
+            let grammarFilePath = Path.Combine(grammarOutputDirectoryPath, Restler.Workflow.Constants.DefaultRestlerGrammarFileName)
+            let grammar = File.ReadAllText(grammarFilePath)
+            Assert.True(grammar.Contains("primitives.restler_static_string(\"2020-02-02\"),"))
+            /// Also test to make sure that 'exactCopy : true' filters out the parameters that are not declared in the spec
+            Assert.False(grammar.Contains("ddd"))
+
+
+
 
         interface IClassFixture<Fixtures.TestSetupAndCleanup>

@@ -49,12 +49,6 @@
           {
             "ParameterList": []
           }
-        ],
-        [
-          "DictionaryCustomPayload",
-          {
-            "ParameterList": []
-          }
         ]
       ],
       "bodyParameters": [
@@ -76,8 +70,8 @@
                   "LeafNode": {
                     "name": "",
                     "payload": {
-                      "Fuzzable": [
-                        {
+                      "Fuzzable": {
+                        "primitiveType": {
                           "Enum": [
                             "api-version",
                             "String",
@@ -87,10 +81,8 @@
                             null
                           ]
                         },
-                        "2020-03-01",
-                        null,
-                        null
-                      ]
+                        "defaultValue": "2020-03-01"
+                      }
                     },
                     "isRequired": true,
                     "isReadOnly": false
@@ -119,9 +111,11 @@
         ]
       ],
       "httpVersion": "1.1",
-      "responseParser": {
-        "writerVariables": [],
-        "headerWriterVariables": [],
+      "dependencyData": {
+        "responseParser": {
+          "writerVariables": [],
+          "headerWriterVariables": []
+        },
         "inputWriterVariables": [
           {
             "requestId": {
@@ -141,28 +135,10 @@
             "primitiveType": "String",
             "kind": "InputParameter"
           }
-        ]
+        ],
+        "orderingConstraintWriterVariables": [],
+        "orderingConstraintReaderVariables": []
       },
-      "inputDynamicObjectVariables": [
-        {
-          "requestId": {
-            "endpoint": "/{resourceName}/type/folder",
-            "xMsPath": {
-              "pathPart": "/{resourceName}",
-              "queryPart": "type=folder"
-            },
-            "method": "Put"
-          },
-          "accessPathParts": {
-            "path": [
-              "resourceName",
-              "path"
-            ]
-          },
-          "primitiveType": "String",
-          "kind": "InputParameter"
-        }
-      ],
       "requestMetadata": {
         "isLongRunningOperation": true
       }
@@ -216,12 +192,6 @@
           {
             "ParameterList": []
           }
-        ],
-        [
-          "DictionaryCustomPayload",
-          {
-            "ParameterList": []
-          }
         ]
       ],
       "bodyParameters": [
@@ -243,8 +213,8 @@
                   "LeafNode": {
                     "name": "",
                     "payload": {
-                      "Fuzzable": [
-                        {
+                      "Fuzzable": {
+                        "primitiveType": {
                           "Enum": [
                             "api-version",
                             "String",
@@ -254,10 +224,8 @@
                             null
                           ]
                         },
-                        "2020-03-01",
-                        null,
-                        null
-                      ]
+                        "defaultValue": "2020-03-01"
+                      }
                     },
                     "isRequired": true,
                     "isReadOnly": false
@@ -286,9 +254,11 @@
         ]
       ],
       "httpVersion": "1.1",
-      "responseParser": {
-        "writerVariables": [],
-        "headerWriterVariables": [],
+      "dependencyData": {
+        "responseParser": {
+          "writerVariables": [],
+          "headerWriterVariables": []
+        },
         "inputWriterVariables": [
           {
             "requestId": {
@@ -308,28 +278,10 @@
             "primitiveType": "String",
             "kind": "InputParameter"
           }
-        ]
+        ],
+        "orderingConstraintWriterVariables": [],
+        "orderingConstraintReaderVariables": []
       },
-      "inputDynamicObjectVariables": [
-        {
-          "requestId": {
-            "endpoint": "/{resourceName}/type/file",
-            "xMsPath": {
-              "pathPart": "/{resourceName}",
-              "queryPart": "type=file"
-            },
-            "method": "Put"
-          },
-          "accessPathParts": {
-            "path": [
-              "resourceName",
-              "path"
-            ]
-          },
-          "primitiveType": "String",
-          "kind": "InputParameter"
-        }
-      ],
       "requestMetadata": {
         "isLongRunningOperation": true
       }
@@ -404,12 +356,6 @@
               }
             ]
           }
-        ],
-        [
-          "DictionaryCustomPayload",
-          {
-            "ParameterList": []
-          }
         ]
       ],
       "bodyParameters": [
@@ -431,8 +377,8 @@
                   "LeafNode": {
                     "name": "",
                     "payload": {
-                      "Fuzzable": [
-                        {
+                      "Fuzzable": {
+                        "primitiveType": {
                           "Enum": [
                             "api-version",
                             "String",
@@ -442,10 +388,8 @@
                             null
                           ]
                         },
-                        "2020-03-01",
-                        null,
-                        null
-                      ]
+                        "defaultValue": "2020-03-01"
+                      }
                     },
                     "isRequired": true,
                     "isReadOnly": false
@@ -474,7 +418,6 @@
         ]
       ],
       "httpVersion": "1.1",
-      "inputDynamicObjectVariables": [],
       "requestMetadata": {
         "isLongRunningOperation": false
       }
@@ -494,23 +437,15 @@
           }
         },
         {
-          "Fuzzable": [
-            "String",
-            "fuzzstring",
-            null,
-            null
-          ]
+          "Fuzzable": {
+            "primitiveType": "String",
+            "defaultValue": "fuzzstring"
+          }
         }
       ],
       "queryParameters": [
         [
           "Schema",
-          {
-            "ParameterList": []
-          }
-        ],
-        [
-          "DictionaryCustomPayload",
           {
             "ParameterList": []
           }
@@ -535,8 +470,8 @@
                   "LeafNode": {
                     "name": "",
                     "payload": {
-                      "Fuzzable": [
-                        {
+                      "Fuzzable": {
+                        "primitiveType": {
                           "Enum": [
                             "api-version",
                             "String",
@@ -546,10 +481,8 @@
                             null
                           ]
                         },
-                        "2020-03-01",
-                        null,
-                        null
-                      ]
+                        "defaultValue": "2020-03-01"
+                      }
                     },
                     "isRequired": true,
                     "isReadOnly": false
@@ -578,7 +511,6 @@
         ]
       ],
       "httpVersion": "1.1",
-      "inputDynamicObjectVariables": [],
       "requestMetadata": {
         "isLongRunningOperation": false
       }
@@ -598,23 +530,15 @@
           }
         },
         {
-          "Fuzzable": [
-            "String",
-            "fuzzstring",
-            null,
-            null
-          ]
+          "Fuzzable": {
+            "primitiveType": "String",
+            "defaultValue": "fuzzstring"
+          }
         }
       ],
       "queryParameters": [
         [
           "Schema",
-          {
-            "ParameterList": []
-          }
-        ],
-        [
-          "DictionaryCustomPayload",
           {
             "ParameterList": []
           }
@@ -639,8 +563,8 @@
                   "LeafNode": {
                     "name": "",
                     "payload": {
-                      "Fuzzable": [
-                        {
+                      "Fuzzable": {
+                        "primitiveType": {
                           "Enum": [
                             "api-version",
                             "String",
@@ -650,10 +574,8 @@
                             null
                           ]
                         },
-                        "2020-03-01",
-                        null,
-                        null
-                      ]
+                        "defaultValue": "2020-03-01"
+                      }
                     },
                     "isRequired": true,
                     "isReadOnly": false
@@ -682,7 +604,6 @@
         ]
       ],
       "httpVersion": "1.1",
-      "inputDynamicObjectVariables": [],
       "requestMetadata": {
         "isLongRunningOperation": false
       }

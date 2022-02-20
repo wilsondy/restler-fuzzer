@@ -33,7 +33,7 @@ module Dependencies =
                                     dictionary
                                     config
                                     List.empty
-                                    None
+                                    []
             let unresolvedPathDeps =
                 dependencies
                 |> List.filter (fun d -> d.producer.IsNone)
@@ -324,7 +324,7 @@ module Dependencies =
                              ResolveBodyDependencies = true
                              UseBodyExamples = Some true
                              SwaggerSpecFilePath = Some [(Path.Combine(Environment.CurrentDirectory, @"swagger\dependencyTests\input_producer_spec.json"))]
-                             CustomDictionaryFilePath = None
+                             CustomDictionaryFilePath = Some (Path.Combine(Environment.CurrentDirectory, @"swagger\dependencyTests\input_producer_dict.json"))
                              AnnotationFilePath = Some (Path.Combine(Environment.CurrentDirectory, @"swagger\dependencyTests\input_producer_annotations.json"))
                              AllowGetProducers = true
                          }
@@ -336,6 +336,20 @@ module Dependencies =
 
             Assert.True(grammar.Contains("""restler_custom_payload_uuid4_suffix("fileId", writer=_file__fileId__post_fileId_path.writer())"""))
             Assert.True(grammar.Contains("""restler_static_string(_file__fileId__post_fileId_path.reader(), quoted=False)"""))
+
+            // Validate (tag, label) annotation.  tag - body producer (jsonpath), label: path parameter.
+            Assert.True(grammar.Contains("""primitives.restler_custom_payload("tag", quoted=True, writer=_archive_post_tag.writer())"""))
+            Assert.True(grammar.Contains("""restler_static_string(_archive_post_tag.reader(), quoted=True)"""))
+
+            // Validate (name, name) annotation.  name - body producer (POST) and consumer (PUT).
+            Assert.True(grammar.Contains("""primitives.restler_fuzzable_object("{ \"fuzz\": false }", writer=_archive_post_name.writer())"""))
+            Assert.True(grammar.Contains("""primitives.restler_static_string(_archive_post_name.reader(), quoted=False)"""))
+
+            // Validate (hash, sig) annotation.  hash - header producer (POST), sig - header consumer (PUT)
+            Assert.True(grammar.Contains("""primitives.restler_custom_payload_query("hash", writer=_archive_post_hash_query.writer())"""))
+            Assert.True(grammar.Contains("""primitives.restler_static_string(_archive_post_hash_query.reader(), quoted=False)"""))
+
+
 
 
         /// Test that the entire body should be able to be replaced with a custom payload
@@ -411,6 +425,73 @@ module Dependencies =
             let message = sprintf "Grammar (test with annotations) does not match baseline.  First difference: %A" grammarDiff
             Assert.True(grammarDiff.IsNone, message)
 
+        [<Fact>]
+        let ``headers in request and responses`` () =
+            let grammarOutputDirPath = ctx.testRootDirPath
+            let config = { Restler.Config.SampleConfig with
+                             IncludeOptionalParameters = true
+                             GrammarOutputDirectoryPath = Some grammarOutputDirPath
+                             ResolveBodyDependencies = true
+                             ResolveHeaderDependencies = true
+                             UseBodyExamples = Some true
+                             SwaggerSpecFilePath = Some [(Path.Combine(Environment.CurrentDirectory, @"swagger\dependencyTests\header_deps.json"))]
+                             CustomDictionaryFilePath = None
+                             AnnotationFilePath = None
+                             AllowGetProducers = true
+                         }
+            Restler.Workflow.generateRestlerGrammar None config
+
+            let actualGrammarFilePath = Path.Combine(grammarOutputDirPath,
+                                                     Restler.Workflow.Constants.DefaultRestlerGrammarFileName)
+            let expectedGrammarFilePath = Path.Combine(Environment.CurrentDirectory,
+                                                       @"baselines\dependencyTests\header_deps_grammar.py")
+
+            // This scenario should work with annotations only.
+            let configWithAnnotations = { config with
+                                            AnnotationFilePath = Some (Path.Combine(Environment.CurrentDirectory, @"swagger\dependencyTests\header_deps_annotations.json"))}
+            Restler.Workflow.generateRestlerGrammar None configWithAnnotations
+
+            let grammarDiff = getLineDifferences expectedGrammarFilePath actualGrammarFilePath
+            let message = sprintf "Grammar (test with annotations) does not match baseline.  First difference: %A" grammarDiff
+            Assert.True(grammarDiff.IsNone, message)
+
+            Restler.Workflow.generateRestlerGrammar None config
+            let grammarDiff = getLineDifferences expectedGrammarFilePath actualGrammarFilePath
+            let message = "Grammar (test without annotations) matches the baseline, this is not expected"
+            Assert.True(grammarDiff.IsSome, message)
+
+
+        /// Test that with annotations there are new dependencies added in the grammar, both for requests without any dependencies
+        /// and with requests that already contain regular request-response dependencies
+        [<Fact>]
+        let ``ordering constraints`` () =
+            /// This test uses a baseline grammar.py to make sure variables appear in the correct locations.
+            let grammarOutputDirPath = ctx.testRootDirPath
+            let config = { Restler.Config.SampleConfig with
+                             IncludeOptionalParameters = true
+                             GrammarOutputDirectoryPath = Some grammarOutputDirPath
+                             ResolveBodyDependencies = true
+                             ResolveHeaderDependencies = true
+                             UseBodyExamples = Some true
+                             SwaggerSpecFilePath = Some [(Path.Combine(Environment.CurrentDirectory, @"swagger\dependencyTests\ordering_test.json"))]
+                             CustomDictionaryFilePath = None
+                             AnnotationFilePath = None
+                             AllowGetProducers = true
+                         }
+            Restler.Workflow.generateRestlerGrammar None config
+
+            let actualGrammarFilePath = Path.Combine(grammarOutputDirPath,
+                                                     Restler.Workflow.Constants.DefaultRestlerGrammarFileName)
+            let expectedGrammarFilePath = Path.Combine(Environment.CurrentDirectory,
+                                                       @"baselines\dependencyTests\ordering_test_grammar.py")
+
+            let configWithAnnotations = { config with
+                                            AnnotationFilePath = Some (Path.Combine(Environment.CurrentDirectory, @"swagger\dependencyTests\ordering_test_annotations.json"))}
+            Restler.Workflow.generateRestlerGrammar None configWithAnnotations
+
+            let grammarDiff = getLineDifferences expectedGrammarFilePath actualGrammarFilePath
+            let message = sprintf "Grammar (test with annotations) does not match baseline.  First difference: %A" grammarDiff
+            Assert.True(grammarDiff.IsNone, message)
 
         interface IClassFixture<Fixtures.TestSetupAndCleanup>
 

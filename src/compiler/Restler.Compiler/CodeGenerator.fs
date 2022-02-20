@@ -24,28 +24,33 @@ module Types =
             trackedParameterName: string option
         }
 
+    type DynamicObjectWriter =
+        | DynamicObjectWriter of string
+
     /// RESTler grammar built-in types
     /// IMPORTANT ! All primitives must be supported in restler/engine/primitives.py
     type RequestPrimitiveType =
         | Restler_static_string_constant of string
         | Restler_static_string_variable of string * bool
         | Restler_static_string_jtoken_delim of string
-        | Restler_fuzzable_string of RequestPrimitiveTypeData
-        | Restler_fuzzable_datetime of RequestPrimitiveTypeData
-        | Restler_fuzzable_object of RequestPrimitiveTypeData
+        | Restler_fuzzable_string of RequestPrimitiveTypeData * DynamicObjectWriter option
+        | Restler_fuzzable_datetime of RequestPrimitiveTypeData * DynamicObjectWriter option
+        | Restler_fuzzable_date of RequestPrimitiveTypeData * DynamicObjectWriter option
+        | Restler_fuzzable_object of RequestPrimitiveTypeData * DynamicObjectWriter option
         | Restler_fuzzable_delim of RequestPrimitiveTypeData
-        | Restler_fuzzable_uuid4 of RequestPrimitiveTypeData
-        | Restler_fuzzable_group of RequestPrimitiveTypeData
-        | Restler_fuzzable_bool of RequestPrimitiveTypeData
-        | Restler_fuzzable_int of RequestPrimitiveTypeData
-        | Restler_fuzzable_number of RequestPrimitiveTypeData
+        | Restler_fuzzable_uuid4 of RequestPrimitiveTypeData * DynamicObjectWriter option
+        | Restler_fuzzable_group of RequestPrimitiveTypeData * DynamicObjectWriter option
+        | Restler_fuzzable_bool of RequestPrimitiveTypeData * DynamicObjectWriter option
+        | Restler_fuzzable_int of RequestPrimitiveTypeData * DynamicObjectWriter option
+        | Restler_fuzzable_number of RequestPrimitiveTypeData * DynamicObjectWriter option
         | Restler_multipart_formdata of string
-        | Restler_custom_payload of RequestPrimitiveTypeData
-        | Restler_custom_payload_header of string
-        | Restler_custom_payload_query of string
+        | Restler_custom_payload of RequestPrimitiveTypeData * DynamicObjectWriter option
+        | Restler_custom_payload_header of string * DynamicObjectWriter option
+        | Restler_custom_payload_query of string * DynamicObjectWriter option
         /// (Payload name, dynamic object writer name)
-        | Restler_custom_payload_uuid4_suffix of string * string option
+        | Restler_custom_payload_uuid4_suffix of string * DynamicObjectWriter option
         | Restler_refreshable_authentication_token of string
+        | Restler_basepath of string
         | Shadow_values of string
         | Response_parser of string
 
@@ -53,11 +58,16 @@ open Types
 
 module NameGenerators =
     let generateDynamicObjectVariableDefinition responseAccessPathParts (requestId:RequestId) =
-        let varName = (generateDynamicObjectVariableName requestId (Some responseAccessPathParts) "_")
+        let varName = (DynamicObjectNaming.generateDynamicObjectVariableName requestId (Some responseAccessPathParts) "_")
         sprintf "%s = dependencies.DynamicVariable(\"%s\")" varName varName
 
+    let generateDynamicObjectOrderingConstraintVariableDefinition (sourceRequestId:RequestId) (targetRequestId:RequestId) =
+        let varName = (DynamicObjectNaming.generateOrderingConstraintVariableName sourceRequestId targetRequestId "_")
+        sprintf "%s = dependencies.DynamicVariable(\"%s\")" varName varName
+
+
     let generateProducerEndpointResponseParserFunctionName (requestId:RequestId) =
-        sprintf "parse_%s" (generateDynamicObjectVariableName requestId None "")
+        sprintf "parse_%s" (DynamicObjectNaming.generateDynamicObjectVariableName requestId None "")
 
 // Gets the RESTler primitive that corresponds to the specified fuzzing payload
 let rec getRestlerPythonPayload (payload:FuzzingPayload) (isQuoted:bool) : RequestPrimitiveType list =
@@ -65,18 +75,27 @@ let rec getRestlerPythonPayload (payload:FuzzingPayload) (isQuoted:bool) : Reque
         match p with
         | Constant (t,v) ->
             Restler_static_string_constant v
-        | Fuzzable (t,v,exv,parameterName) ->
-            match t with
-            | Bool -> Restler_fuzzable_bool { defaultValue = v ; isQuoted = false ; exampleValue = exv ; trackedParameterName = parameterName }
+        | Fuzzable fp ->
+            let v = fp.defaultValue
+            let exv = fp.exampleValue
+            let parameterName = fp.parameterName
+            let dynamicObject = if fp.dynamicObject.IsSome then Some (DynamicObjectWriter fp.dynamicObject.Value.variableName) else None
+            match fp.primitiveType with
+            | Bool ->
+                Restler_fuzzable_bool ({ defaultValue = v ; isQuoted = false ; exampleValue = exv ; trackedParameterName = parameterName }, dynamicObject)
             | PrimitiveType.DateTime ->
-                Restler_fuzzable_datetime { defaultValue = v ; isQuoted = isQuoted ; exampleValue = exv ; trackedParameterName = parameterName }
+                Restler_fuzzable_datetime ({ defaultValue = v ; isQuoted = isQuoted ; exampleValue = exv ; trackedParameterName = parameterName }, dynamicObject)
+            | PrimitiveType.Date ->
+                Restler_fuzzable_date ({ defaultValue = v ; isQuoted = isQuoted ; exampleValue = exv ; trackedParameterName = parameterName }, dynamicObject)
+
             | PrimitiveType.String ->
-                Restler_fuzzable_string { defaultValue = v ; isQuoted = isQuoted ; exampleValue = exv ; trackedParameterName = parameterName }
-            | PrimitiveType.Object -> Restler_fuzzable_object { defaultValue = v ; isQuoted = false ; exampleValue = exv  ; trackedParameterName = parameterName }
-            | Int -> Restler_fuzzable_int { defaultValue = v ; isQuoted = false; exampleValue = exv ; trackedParameterName = parameterName }
-            | Number -> Restler_fuzzable_number { defaultValue = v ; isQuoted = false ; exampleValue = exv  ; trackedParameterName = parameterName }
+                Restler_fuzzable_string ({ defaultValue = v ; isQuoted = isQuoted ; exampleValue = exv ; trackedParameterName = parameterName }, dynamicObject)
+            | PrimitiveType.Object -> Restler_fuzzable_object ({ defaultValue = v ; isQuoted = false ; exampleValue = exv  ; trackedParameterName = parameterName  }, dynamicObject)
+            | Int -> Restler_fuzzable_int ({ defaultValue = v ; isQuoted = false; exampleValue = exv ; trackedParameterName = parameterName }, dynamicObject)
+
+            | Number -> Restler_fuzzable_number ({ defaultValue = v ; isQuoted = false ; exampleValue = exv  ; trackedParameterName = parameterName }, dynamicObject)
             | Uuid ->
-                Restler_fuzzable_uuid4 { defaultValue = v ; isQuoted = isQuoted ; exampleValue = exv ; trackedParameterName = parameterName }
+                Restler_fuzzable_uuid4 ({ defaultValue = v ; isQuoted = isQuoted ; exampleValue = exv ; trackedParameterName = parameterName }, dynamicObject)
             | PrimitiveType.Enum (enumPropertyName, _, enumeration, defaultValue) ->
                 let defaultStr =
                     match defaultValue with
@@ -88,18 +107,19 @@ let rec getRestlerPythonPayload (payload:FuzzingPayload) (isQuoted:bool) : Reque
                              (enumeration |> List.map (fun s -> sprintf "'%s'" s) |> String.concat ",")
                              defaultStr
                     )
-                Restler_fuzzable_group
-                    { defaultValue = groupValue ; isQuoted = isQuoted ; exampleValue = exv ; trackedParameterName = parameterName }
+                Restler_fuzzable_group (
+                    { defaultValue = groupValue ; isQuoted = isQuoted ; exampleValue = exv ; trackedParameterName = parameterName }, dynamicObject)
         | Custom c ->
+            let dynamicObject = if c.dynamicObject.IsSome then Some (DynamicObjectWriter c.dynamicObject.Value.variableName) else None
             match c.payloadType with
             | CustomPayloadType.String ->
-                Restler_custom_payload { defaultValue = c.payloadValue ; isQuoted = isQuoted ; exampleValue = None ; trackedParameterName = None }
+                Restler_custom_payload ({ defaultValue = c.payloadValue ; isQuoted = isQuoted ; exampleValue = None ; trackedParameterName = None }, dynamicObject)
             | CustomPayloadType.UuidSuffix ->
-                Restler_custom_payload_uuid4_suffix (c.payloadValue, if c.dynamicObject.IsSome then Some c.dynamicObject.Value.variableName else None)
+                Restler_custom_payload_uuid4_suffix (c.payloadValue, dynamicObject)
             | CustomPayloadType.Header ->
-                Restler_custom_payload_header c.payloadValue  // TODO: need test
+                Restler_custom_payload_header (c.payloadValue, dynamicObject)
             | CustomPayloadType.Query ->
-                Restler_custom_payload_query c.payloadValue  // TODO: need test
+                Restler_custom_payload_query (c.payloadValue, dynamicObject)
         | DynamicObject dv ->
             Restler_static_string_variable (sprintf "%s.reader()" dv.variableName, isQuoted)
         | PayloadParts p ->
@@ -299,6 +319,7 @@ let generatePythonParameter includeOptionalParameters parameterKind (requestPara
             | _ when isNullValue -> false
             | PrimitiveType.String
             | PrimitiveType.DateTime
+            | PrimitiveType.Date
             | PrimitiveType.Uuid ->
                 true
             | PrimitiveType.Enum (_, enumType, _, _) ->
@@ -340,10 +361,10 @@ let generatePythonParameter includeOptionalParameters parameterKind (requestPara
                 | FuzzingPayload.Constant (primitiveType, v) ->
                     isPrimitiveTypeQuoted primitiveType (isNull v),
                     false, false
-                | FuzzingPayload.Fuzzable (primitiveType, _, _,_) ->
+                | FuzzingPayload.Fuzzable fp ->
                     // Note: this is a current RESTler limitation -
                     // fuzzable values may not be set to null without changing the grammar.
-                    isPrimitiveTypeQuoted primitiveType false,
+                    isPrimitiveTypeQuoted fp.primitiveType false,
                     true, false
                 | FuzzingPayload.DynamicObject dv ->
                     isPrimitiveTypeQuoted dv.primitiveType false,
@@ -421,6 +442,8 @@ let generatePythonFromRequestElement includeOptionalParameters (requestId:Reques
     match e with
     | Method m ->
         [Restler_static_string_constant (sprintf "%s%s" (m.ToString().ToUpper()) SPACE)]
+    | RequestElement.BasePath bp ->
+        [ Restler_basepath bp ]
     | RequestElement.Path parts ->
         let queryStartIndex =
             match requestId.xMsPath with
@@ -529,32 +552,79 @@ let generatePythonFromRequestElement includeOptionalParameters (requestId:Reques
             Restler_static_string_constant (sprintf "%s: %s%s" name content RETURN))
     | HttpVersion v->
         [Restler_static_string_constant (sprintf "%sHTTP/%s%s" SPACE v RETURN)]
-    | ResponseParser r ->
-        match r with
-        | None -> []
-        | Some responseParser ->
+    | RequestDependencyData rd ->
+        if rd.IsSome then
+            let responseParser = rd.Value.responseParser
             let generateWriterStatement var =
                sprintf "%s.writer()" var
-            let variablesReferencedInParser = responseParser.writerVariables @ responseParser.headerWriterVariables
+            let generateReaderStatement var =
+               sprintf "%s.reader()" var
+
+            let variablesReferencedInParser =
+                match responseParser with
+                | Some rp -> rp.writerVariables @ rp.headerWriterVariables
+                | None -> []
             let parserStatement =
                 match variablesReferencedInParser with
                 | [] -> ""
                 | writerVariable::rest ->
                    sprintf @"'parser': %s,"
                         (NameGenerators.generateProducerEndpointResponseParserFunctionName writerVariable.requestId)
-
             let postSend =
-                let writerVariablesList =
-                    variablesReferencedInParser @ responseParser.inputWriterVariables
+                let allWriterVariableStatements =
+                    let writerVariableStatements =
+                        variablesReferencedInParser @ rd.Value.inputWriterVariables
+                        |> List.map (fun producerWriter ->
+                                         generateWriterStatement (DynamicObjectNaming.generateDynamicObjectVariableName producerWriter.requestId (Some producerWriter.accessPathParts) "_"))
+
+                    let orderingConstraintVariableStatements =
+                        rd.Value.orderingConstraintWriterVariables
+                        |> List.map (fun constraintVariable ->
+                                           generateWriterStatement (DynamicObjectNaming.generateOrderingConstraintVariableName constraintVariable.sourceRequestId constraintVariable.targetRequestId "_"))
+
+                    writerVariableStatements @ orderingConstraintVariableStatements
+
+                let readerVariablesList =
+                    let allReaderVariableStatements =
+                        rd.Value.orderingConstraintReaderVariables
+                        |> List.map (fun constraintVariable ->
+                                           generateReaderStatement (DynamicObjectNaming.generateOrderingConstraintVariableName constraintVariable.sourceRequestId constraintVariable.targetRequestId "_"))
+
+                    allReaderVariableStatements
                     // TODO: generate this ID only once if possible.
-                    |> List.map (fun producerWriter ->
-                                      let stmt = generateWriterStatement (generateDynamicObjectVariableName producerWriter.requestId (Some producerWriter.accessPathParts) "_")
+                    |> List.map (fun stmt ->
                                       let indent = Seq.init 4 (fun _ -> TAB) |> String.concat ""
                                       sprintf "%s%s" indent stmt
                                       )
                     |> String.concat ",\n"
-                sprintf @"
-    {
+
+                let writerVariablesList =
+                    allWriterVariableStatements
+                    // TODO: generate this ID only once if possible.
+                    |> List.map (fun stmt ->
+                                      let indent = Seq.init 4 (fun _ -> TAB) |> String.concat ""
+                                      sprintf "%s%s" indent stmt
+                                      )
+                    |> String.concat ",\n"
+
+                let preSendElement =
+                    if readerVariablesList.Length > 0 then
+                        sprintf @"
+        'pre_send':
+        {
+            'dependencies':
+            [
+%s
+            ]
+        }
+"
+                            readerVariablesList
+                    else
+                        ""
+
+                let postSendElement =
+                    if writerVariablesList.Length > 0 then
+                        sprintf @"
         'post_send':
         {
             %s
@@ -563,24 +633,68 @@ let generatePythonFromRequestElement includeOptionalParameters (requestId:Reques
 %s
             ]
         }
+"
+                            parserStatement
+                            writerVariablesList
+                    else
+                        ""
+
+                sprintf @"
+    {
+%s
     }"
-                    parserStatement
-                    writerVariablesList
+                    ([ preSendElement ; postSendElement ]
+                     |> List.filter (fun x -> not (String.IsNullOrWhiteSpace x))
+                     |> String.concat ",\n")
 
             [Response_parser postSend]
+        else
+            []
     | Delimiter ->
         [Restler_static_string_constant RETURN]
 
 /// Generates the python restler grammar definitions corresponding to the request
 let generatePythonFromRequest (request:Request) includeOptionalParameters mergeStaticStrings =
+    /// Gets either the schema or examples payload present in the list
     let getParameterPayload queryOrBodyParameters =
-        queryOrBodyParameters |> List.head |> snd
-
-    let getCustomParameterPayload (queryOrBodyParameters:(ParameterPayloadSource * _) list) =
         match queryOrBodyParameters
-              |> List.tryFind (fun (payloadSource, pList) -> payloadSource = ParameterPayloadSource.DictionaryCustomPayload) with
+              |> List.tryFind (fun (payloadSource, _) ->
+                                 payloadSource = ParameterPayloadSource.Examples || payloadSource = ParameterPayloadSource.Schema) with
         | Some (_, ParameterList pList) -> pList
         | _ -> Seq.empty
+
+
+    /// Merges all the dictionary custom payloads present in the list and returns them
+    let getCustomParameterPayload (queryOrBodyParameters:(ParameterPayloadSource * RequestParametersPayload) list) =
+        queryOrBodyParameters
+        |> List.fold (fun (currentPList) (payloadSource, pList) ->
+                            let parameterList =
+                                if payloadSource = ParameterPayloadSource.DictionaryCustomPayload then
+                                    match pList with
+                                    | ParameterList pl -> pl
+                                    | Example _ ->
+                                        // filter out the example here ; it will be handled elsewhere.
+                                        Seq.empty
+                                else
+                                    Seq.empty
+                            [parameterList ; currentPList] |> Seq.concat)
+                        Seq.empty
+
+    let getParameterListPayload (queryOrBodyParameters:(ParameterPayloadSource * RequestParametersPayload) list) =
+        let declaredPayload = getParameterPayload queryOrBodyParameters
+        let injectedPayload = getCustomParameterPayload queryOrBodyParameters
+        ParameterList ([declaredPayload ; injectedPayload] |> Seq.concat)
+
+    let getExamplePayload (queryOrBodyParameters:(ParameterPayloadSource * RequestParametersPayload) list) =
+        queryOrBodyParameters
+        |> Seq.choose (fun (payloadSource, payloadValue) ->
+                            if payloadSource = ParameterPayloadSource.DictionaryCustomPayload then
+                                match payloadValue with
+                                | ParameterList _ -> None
+                                | Example example ->
+                                    Some example
+                            else None)
+        |> Seq.tryHead
 
     let getMergedStaticStringSeq (strList:string seq) =
 
@@ -615,28 +729,25 @@ let generatePythonFromRequest (request:Request) includeOptionalParameters mergeS
 
     let requestElements = [
         Method request.method
+        BasePath request.basePath
         Path request.path
-        QueryParameters (let declaredPayload = getParameterPayload request.queryParameters
-                         match declaredPayload with
-                         | ParameterList pList ->
-                             // Add the injected custom payload parameters
-                             let customPList = getCustomParameterPayload request.queryParameters
-                             ParameterList ([pList ; customPList] |> Seq.concat)
-                         | _ -> declaredPayload)
+        QueryParameters (getParameterListPayload request.queryParameters)
         HttpVersion request.httpVersion
         Headers request.headers
-        HeaderParameters (getParameterPayload request.headerParameters)
-        // custom parameters special case
-        HeaderParameters (match request.headerParameters
-                                |> List.tryFind (fun (ps,_) -> ps = DictionaryCustomPayload) with
-                          | None -> ParameterList []
-                          | Some x -> getParameterPayload [x])
+        HeaderParameters (getParameterListPayload request.headerParameters)
         (match request.token with
             | TokenKind.Refreshable -> RefreshableToken
             | (TokenKind.Static token) -> Token (token))
-        Body (getParameterPayload request.bodyParameters)
+        Body (let parameterListPayload = getParameterListPayload request.bodyParameters
+              let examplePayload = getExamplePayload request.bodyParameters
+              // Either an example or parameter list should be present, but not both.
+              // For example, additional parameters will not be combined with an 'Example' payload which
+              // the user expects to be used without modification.
+              match examplePayload with
+              | Some p -> Example p
+              | None -> parameterListPayload)
         Delimiter
-        ResponseParser request.responseParser
+        RequestDependencyData request.dependencyData
     ]
 
     requestElements
@@ -742,6 +853,17 @@ let getDynamicObjectDefinitions (writerVariables:seq<DynamicObjectWriterVariable
     }
     |> Seq.toList
 
+let getOrderingConstraintDynamicObjectDefinitions (writerVariables:seq<OrderingConstraintVariable>) =
+    seq {
+        // First, define the dynamic variables initialized by the response parser
+        for writerVariable in writerVariables do
+            yield PythonGrammarElement.DynamicObjectDefinition
+                    (NameGenerators.generateDynamicObjectOrderingConstraintVariableDefinition writerVariable.sourceRequestId writerVariable.targetRequestId)
+    }
+    |> Seq.distinct
+    |> Seq.toList
+
+
 type ResponseVariableKind =
     | Body
     | Header
@@ -750,7 +872,8 @@ let getResponseParsers (requests: Request list) =
 
     let random = System.Random(0)
 
-    let responseParsers = requests |> Seq.choose (fun r -> r.responseParser)
+    let dependencyData = requests |> Seq.choose (fun r -> r.dependencyData)
+    let responseParsers = dependencyData |> Seq.choose (fun d -> d.responseParser)
 
     // First, define the dynamic variables initialized by the response parser
     let dynamicObjectDefinitionsFromBodyResponses =
@@ -760,7 +883,10 @@ let getResponseParsers (requests: Request list) =
         getDynamicObjectDefinitions (responseParsers |> Seq.map (fun r -> r.headerWriterVariables |> seq) |> Seq.concat)
 
     let dynamicObjectDefinitionsFromInputParameters =
-        getDynamicObjectDefinitions (responseParsers |> Seq.map (fun r -> r.inputWriterVariables |> seq) |> Seq.concat)
+        getDynamicObjectDefinitions (dependencyData |> Seq.map (fun d -> d.inputWriterVariables |> seq) |> Seq.concat)
+
+    let dynamicObjectDefinitionsFromOrderingConstraints =
+        getOrderingConstraintDynamicObjectDefinitions (dependencyData |> Seq.map (fun d -> d.orderingConstraintWriterVariables |> seq) |> Seq.concat)
 
     let formatParserFunction (parser:ResponseParser) =
         let functionName =
@@ -770,10 +896,10 @@ let getResponseParsers (requests: Request list) =
         // Go through the producer fields and parse them all out of the response
         // STOPPED HERE:
         // also do 'if true' for header parsing and body parsing where 'true' is if there are actually variables to parse out of there.
-        let getResponseParsingStatements writerVariables (variableKind:ResponseVariableKind) =
+        let getResponseParsingStatements (writerVariables:DynamicObjectWriterVariable list) (variableKind:ResponseVariableKind) =
             [
                 for w in writerVariables do
-                    let dynamicObjectVariableName = generateDynamicObjectVariableName w.requestId (Some w.accessPathParts) "_"
+                    let dynamicObjectVariableName = DynamicObjectNaming.generateDynamicObjectVariableName w.requestId (Some w.accessPathParts) "_"
                     let tempVariableName = sprintf "temp_%d" (random.Next(10000))
                     let emptyInitStatement = sprintf "%s = None" tempVariableName
                     let getPath (part:string) =
@@ -905,6 +1031,7 @@ def %s(data, **kwargs):
         yield! dynamicObjectDefinitionsFromBodyResponses
         yield! dynamicObjectDefinitionsFromHeaderResponses
         yield! dynamicObjectDefinitionsFromInputParameters
+        yield! dynamicObjectDefinitionsFromOrderingConstraints
         yield! (responseParsersWithParserFunction |> Seq.map (fun r -> formatParserFunction r) |> Seq.toList)
     ]
 
@@ -934,9 +1061,12 @@ let getRequests(requests:Request list) includeOptionalParameters =
             match exv with
             | None -> ""
             | Some str ->
-                let exStr, exDelim = quoteStringForPythonGrammar str
-                let quotedStr = sprintf "%s%s%s" exDelim exStr exDelim
-                sprintf ", examples=[%s]" quotedStr
+                if isNull str then
+                    sprintf ", examples=[None]"
+                else
+                    let exStr, exDelim = quoteStringForPythonGrammar str
+                    let quotedStr = sprintf "%s%s%s" exDelim exStr exDelim
+                    sprintf ", examples=[%s]" quotedStr
 
         let getTrackedParamPrimitiveParameter paramName =
             match paramName with
@@ -945,6 +1075,12 @@ let getRequests(requests:Request list) includeOptionalParameters =
                 let exStr, exDelim = quoteStringForPythonGrammar str
                 let quotedStr = sprintf "%s%s%s" exDelim exStr exDelim
                 sprintf ", param_name=%s" quotedStr
+
+        let formatDynamicObjectVariable (dynamicObject:DynamicObjectWriter option) =
+            match dynamicObject with
+            | None -> ""
+            | Some (DynamicObjectWriter v) ->
+                sprintf ", writer=%s.writer()" v
 
         let str =
             match p with
@@ -969,7 +1105,7 @@ let getRequests(requests:Request list) includeOptionalParameters =
                 sprintf "primitives.restler_static_string(%s, quoted=%s)"
                         s
                         (if isQuoted then "True" else "False")
-            | Restler_fuzzable_string s ->
+            | Restler_fuzzable_string (s, dynamicObject) ->
                 if String.IsNullOrEmpty s.defaultValue then
                     printfn "ERROR: fuzzable strings should not be empty.  Skipping."
                     ""
@@ -984,33 +1120,44 @@ let getRequests(requests:Request list) includeOptionalParameters =
                              (if s.isQuoted then "True" else "False")
                              exampleParameter
                              trackedParamName
-            | Restler_fuzzable_group s ->
+            | Restler_fuzzable_group (s, dynamicObject) ->
                 sprintf "primitives.restler_fuzzable_group(%s,quoted=%s%s)"
                         s.defaultValue
                         (if s.isQuoted then "True" else "False")
                         (getExamplePrimitiveParameter s.exampleValue)
-            | Restler_fuzzable_int s ->
-                sprintf "primitives.restler_fuzzable_int(\"%s\"%s%s)"
+            | Restler_fuzzable_int (s, dynamicObject) ->
+                sprintf "primitives.restler_fuzzable_int(\"%s\"%s%s%s)"
                         s.defaultValue
                         (getExamplePrimitiveParameter s.exampleValue)
                         (getTrackedParamPrimitiveParameter s.trackedParameterName)
-            | Restler_fuzzable_number s ->
-                sprintf "primitives.restler_fuzzable_number(\"%s\"%s%s)"
+                        (formatDynamicObjectVariable dynamicObject)
+            | Restler_fuzzable_number (s, dynamicObject) ->
+                sprintf "primitives.restler_fuzzable_number(\"%s\"%s%s%s)"
                         s.defaultValue
                         (getExamplePrimitiveParameter s.exampleValue)
                         (getTrackedParamPrimitiveParameter s.trackedParameterName)
-            | Restler_fuzzable_bool s ->
-                sprintf "primitives.restler_fuzzable_bool(\"%s\"%s%s)"
+                        (formatDynamicObjectVariable dynamicObject)
+            | Restler_fuzzable_bool (s, dynamicObject) ->
+                sprintf "primitives.restler_fuzzable_bool(\"%s\"%s%s%s)"
                         s.defaultValue
                         (getExamplePrimitiveParameter s.exampleValue)
                         (getTrackedParamPrimitiveParameter s.trackedParameterName)
-            | Restler_fuzzable_datetime s ->
-                sprintf "primitives.restler_fuzzable_datetime(\"%s\", quoted=%s%s%s)"
+                        (formatDynamicObjectVariable dynamicObject)
+            | Restler_fuzzable_datetime (s, dynamicObject) ->
+                sprintf "primitives.restler_fuzzable_datetime(\"%s\", quoted=%s%s%s%s)"
                         s.defaultValue
                         (if s.isQuoted then "True" else "False")
                         (getExamplePrimitiveParameter s.exampleValue)
                         (getTrackedParamPrimitiveParameter s.trackedParameterName)
-            | Restler_fuzzable_object s ->
+                        (formatDynamicObjectVariable dynamicObject)
+            | Restler_fuzzable_date (s, dynamicObject) ->
+                sprintf "primitives.restler_fuzzable_date(\"%s\", quoted=%s%s%s%s)"
+                        s.defaultValue
+                        (if s.isQuoted then "True" else "False")
+                        (getExamplePrimitiveParameter s.exampleValue)
+                        (getTrackedParamPrimitiveParameter s.trackedParameterName)
+                        (formatDynamicObjectVariable dynamicObject)
+            | Restler_fuzzable_object (s, dynamicObject) ->
                 if String.IsNullOrEmpty s.defaultValue then
                     printfn "ERROR: fuzzable objects should not be empty.  Skipping."
                     ""
@@ -1019,33 +1166,39 @@ let getRequests(requests:Request list) includeOptionalParameters =
                     let quotedDefaultString =
                         sprintf "%s%s%s" delim str delim
                     let exampleParameter = getExamplePrimitiveParameter s.exampleValue
-                    sprintf "primitives.restler_fuzzable_object(%s%s%s)"
+                    sprintf "primitives.restler_fuzzable_object(%s%s%s%s)"
                             quotedDefaultString
                             exampleParameter
                             (getTrackedParamPrimitiveParameter s.trackedParameterName)
-            | Restler_fuzzable_uuid4 s ->
-                sprintf "primitives.restler_fuzzable_uuid4(\"%s\", quoted=%s%s%s)"
+                            (formatDynamicObjectVariable dynamicObject)
+            | Restler_fuzzable_uuid4 (s, dynamicObject) ->
+                sprintf "primitives.restler_fuzzable_uuid4(\"%s\", quoted=%s%s%s%s)"
                         s.defaultValue
                         (if s.isQuoted then "True" else "False")
                         (getExamplePrimitiveParameter s.exampleValue)
                         (getTrackedParamPrimitiveParameter s.trackedParameterName)
-            | Restler_custom_payload p ->
-                sprintf "primitives.restler_custom_payload(\"%s\", quoted=%s)"
+                        (formatDynamicObjectVariable dynamicObject)
+            | Restler_custom_payload (p, dynamicObject) ->
+                sprintf "primitives.restler_custom_payload(\"%s\", quoted=%s%s)"
                         p.defaultValue
                         (if p.isQuoted then "True" else "False")
-            | Restler_custom_payload_uuid4_suffix (p, variableName) ->
-                let variableNamePart =
-                    match variableName with
-                    | None -> ""
-                    | Some vn ->
-                        sprintf ", writer=%s.writer()" vn
-                sprintf "primitives.restler_custom_payload_uuid4_suffix(\"%s\"%s)" p variableNamePart
-            | Restler_custom_payload_header p ->
-                sprintf "primitives.restler_custom_payload_header(\"%s\")" p
-            | Restler_custom_payload_query q ->
-                sprintf "primitives.restler_custom_payload_query(\"%s\")" q
+                        (formatDynamicObjectVariable dynamicObject)
+            | Restler_custom_payload_uuid4_suffix (p, dynamicObject) ->
+                sprintf "primitives.restler_custom_payload_uuid4_suffix(\"%s\"%s)"
+                        p
+                        (formatDynamicObjectVariable dynamicObject)
+            | Restler_custom_payload_header (p, dynamicObject) ->
+                sprintf "primitives.restler_custom_payload_header(\"%s\"%s)"
+                        p
+                        (formatDynamicObjectVariable dynamicObject)
+            | Restler_custom_payload_query (q, dynamicObject) ->
+                sprintf "primitives.restler_custom_payload_query(\"%s\"%s)"
+                        q
+                        (formatDynamicObjectVariable dynamicObject)
             | Restler_refreshable_authentication_token tok ->
                 sprintf "primitives.restler_refreshable_authentication_token(\"%s\")" tok
+            | Restler_basepath bp ->
+                sprintf "primitives.restler_basepath(\"%s\")" bp
             | Response_parser s -> s
             | p ->
                 raise (UnsupportedType (sprintf "Primitive not yet implemented: %A" p))

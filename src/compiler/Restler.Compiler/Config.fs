@@ -34,6 +34,19 @@ type SwaggerSpecConfig =
         AnnotationFilePath: string option
     }
 
+/// The configuration for the payload examples.
+type ExampleFileConfig =
+    {
+        /// The path to the example configuration file that contains the examples associated with
+        /// one or more request types from the spec.
+        filePath : string
+
+        // If 'true', copy these examples exactly, without substituting any parameter values from the dictionary
+        // If 'false' (default), the examples are merged with the schema.  In particular, parameters with names
+        // that do not match the schema are discarded.
+        exactCopy : bool
+    }
+
 /// User-specified compiler configuration
 type Config =
     {
@@ -66,6 +79,11 @@ type Config =
 
         UseBodyExamples : bool option
 
+        /// When specified, all example payloads are used - both the ones in the specification and the ones in the
+        /// example config file.
+        /// False by default - example config files override any other available payload examples
+        UseAllExamplePayloads : bool option
+
         /// When set to 'true', discovers examples and outputs them to a directory next to the grammar.
         /// If an existing directory exists, does not over-write it.
         DiscoverExamples : bool
@@ -80,6 +98,10 @@ type Config =
         /// File path specifying the example config file
         ExampleConfigFilePath : string option
 
+        /// Specifies the example config files.  If the example config file path
+        /// is specified, both are used.
+        ExampleConfigFiles : ExampleFileConfig list option
+
         /// Perform data fuzzing
         DataFuzzing : bool
 
@@ -89,6 +111,8 @@ type Config =
         ResolveQueryDependencies: bool
 
         ResolveBodyDependencies: bool
+
+        ResolveHeaderDependencies: bool
 
         UseRefreshableToken : bool option
 
@@ -107,6 +131,10 @@ type Config =
         // parameter names for all fuzzable values.  For example:
         // restler_fuzzable_string("1", param_name="num_items")
         TrackFuzzedParameterNames : bool
+
+        // The maximum depth for Json properties in the schema to test
+        // Any properties exceeding this depth are removed.
+        JsonPropertyMaxDepth : int option
     }
 
 let convertToAbsPath (currentDirPath:string) (filePath:string) =
@@ -178,6 +206,14 @@ let convertRelativeToAbsPaths configFilePath config =
         | Some p -> Some (convertToAbsPath configFileDirPath p)
         | None -> None
 
+    let exampleConfigFiles =
+        match config.ExampleConfigFiles with
+        | Some ec ->
+            Some (ec |> List.map (fun ecf ->
+                                    { ecf with
+                                         filePath = convertToAbsPath configFileDirPath ecf.filePath }))
+        | None -> None
+
     { config with
         SwaggerSpecFilePath = swaggerSpecFilePath
         CustomDictionaryFilePath = customDictionaryFilePath
@@ -186,6 +222,7 @@ let convertRelativeToAbsPaths configFilePath config =
         SwaggerSpecConfig = apiSpecs
         AnnotationFilePath = annotationsFilePath
         ExampleConfigFilePath = exampleConfigFilePath
+        ExampleConfigFiles = exampleConfigFiles
     }
 
 
@@ -198,6 +235,7 @@ let SampleConfig =
         CustomDictionaryFilePath = None
         AnnotationFilePath = None
         ExampleConfigFilePath = None
+        ExampleConfigFiles = None
         GrammarOutputDirectoryPath = None
         IncludeOptionalParameters = true
         UsePathExamples = None
@@ -205,9 +243,11 @@ let SampleConfig =
         UseBodyExamples = None
         UseHeaderExamples = None
         DiscoverExamples = false
+        UseAllExamplePayloads = None
         ExamplesDirectory = ""
         ResolveQueryDependencies = true
         ResolveBodyDependencies = false
+        ResolveHeaderDependencies = false
         ReadOnlyFuzz = false
         UseRefreshableToken = Some true
         AllowGetProducers = false
@@ -215,6 +255,7 @@ let SampleConfig =
         DataFuzzing = true
         ApiNamingConvention = None
         TrackFuzzedParameterNames = false
+        JsonPropertyMaxDepth = None
     }
 
 /// The default config used for unit tests.  Most of these should also be the defaults for
@@ -228,16 +269,19 @@ let DefaultConfig =
         CustomDictionaryFilePath = None
         AnnotationFilePath = None
         ExampleConfigFilePath = None
+        ExampleConfigFiles = None
         GrammarOutputDirectoryPath = None
         IncludeOptionalParameters = true
         UseQueryExamples = Some true
         UseHeaderExamples = Some true
         UseBodyExamples = Some true
         UsePathExamples = Some false
+        UseAllExamplePayloads = Some false
         DiscoverExamples = false
         ExamplesDirectory = ""
         ResolveQueryDependencies = true
         ResolveBodyDependencies = true
+        ResolveHeaderDependencies = false
         ReadOnlyFuzz = false
         UseRefreshableToken = Some true
         AllowGetProducers = false
@@ -245,4 +289,5 @@ let DefaultConfig =
         DataFuzzing = false
         ApiNamingConvention = None
         TrackFuzzedParameterNames = false
+        JsonPropertyMaxDepth = None
     }

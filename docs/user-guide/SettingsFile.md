@@ -32,6 +32,11 @@ Path to your X.509 certificate file in PEM format.
 
 If provided and valid, RESTler will attempt to use it during the SSL handshake.
 
+### client_certificate_key_path: str (default None)
+Path to your key file in a txt file.
+
+If provided and valid, RESTler will attempt to use it during the SSL handshake.
+
 ### custom_bug_codes: list(str)
 List of status codes that will be flagged as bugs.
 
@@ -97,6 +102,11 @@ Example: `management.web.com`
 
 (Note: do NOT include https:// or slashes here!)
 
+### basepath: string (default None)
+Set to override the basepath that is specified in the grammar.
+
+Example: `/api/v2`
+
 ### include_user_agent: bool (default True)
 Set to false to disable sending user agent with requests
 
@@ -155,6 +165,13 @@ the examples instead of just the first one.
 The supported ```payload_kind``` value is 'all'.
 
 
+### add_fuzzable_dates: bool (default False)
+Set to True to generate additional dates
+near the current date (e.g. one in the future) that will be used for fuzzable date types in addition to
+the values specified in the dictionary.
+Since some API parameters require a current or future date,
+this setting can be used to generate those values, without having to modify the dictionary.
+
 ### max_request_execution_time: float (default 120, max 600)
 The maximum amount of time, in seconds, to wait for a response after sending a request.
 
@@ -162,7 +179,7 @@ The maximum amount of time, in seconds, to wait for a response after sending a r
 Set to True to disable SSL for requests
 
 ### path_regex: str (default None=No regex filtering)
-Filters the grammar to only use endpoints whose paths contain the given regex string. 
+Filters the grammar to only use endpoints whose paths contain the given regex string.
 
 Example: `(\w*)/virtualNetworks/(\w*)`
 
@@ -171,10 +188,55 @@ Example: `disk|virtualNetwork`
 ### save_results_in_fixed_dirname: bool (default False)
 Save the results in a directory with a fixed name (skip the 'experiment\<pid\>' subdir).
 
+### disable_logging: bool (default False)
+Set to True to disable logging to the network logs and main.txt.
+
 ### request_throttle_ms: float (default None)
 The time, in milliseconds, to throttle each request being sent.
 This is here for special cases where the server will block requests from connections that arrive too quickly.
 Using this setting is not recommended.
+
+### custom_retry_settings: dict (default empty)
+
+The settings for specifying custom status codes or status text on which to re-try the request.  These
+override the default values.
+
+__status_codes__
+
+A list of response status codes on which the request should be re-tried may be specified as follows
+(shown below with the default value):
+
+```json
+"custom_retry_settings": {
+     "status_codes": [
+         "429"
+     ]
+}
+```
+
+__response_text__
+
+A list of strings in the response on which the request should be re-tried may be specified as follows
+(shown below with the default value):
+
+```json
+"custom_retry_settings": {
+     "response_text": [
+         "AnotherOperationInProgress"
+     ]
+}
+```
+
+___interval_sec__
+
+The number of seconds to wait between retries (shown below with the default value).
+
+```json
+"custom_retry_settings": {
+     "interval_sec": 5
+}
+```
+
 
 ### target_ip: str (default None)
 The IP address of the target webserver.
@@ -200,7 +262,7 @@ When set, polls for async resource creation before continuing
 Set to True to ignore socked data decoding failures
 See: https://github.com/microsoft/restler-fuzzer/issues/164
 
-## Per resource settings:
+## Per resource settings
 Certain settings can be applied to specific endpoints.
 These settings a defined in a per_resource_settings dict.
 For example:
@@ -215,6 +277,79 @@ For example:
 The above snippet will set the producer timing delay to 5 and
 activate create-once for the specified endpoint.
 Per resource settings override any global settings.
+
+## Sequence exploration settings
+The following settings can be applied to control how RESTler
+executes request sequences.
+
+__create_prefix_once__
+For requests that have dependencies on pre-requisite resources,
+RESTler executes the entire sequence of requests required to fuzz
+the current request every time it fuzzes the request,
+except for if the request type has a ```GET``` or ```HEAD``` method.
+This default maximizes reproducibility.  ```GET``` and ```HEAD``` methods
+are assumed to have no side effects on the resources created by the API,
+so pre-requisite resources are not re-created when fuzzing them.
+
+All requests prior to the current request being fuzzed (the _sequence prefix_) can either be re-executed every time, or saved for testing all combinations of the current request.  This can be controlled on a per-method or per-endpoint basis, as follows.
+
+1. Execute the entire sequence, except for
+requests with `GET` methods.
+
+```json
+  "sequence_exploration_settings": {
+    "create_prefix_once": [
+      {
+          "methods": ["GET"],
+          "endpoints": "*",
+          "reset_after_success": false
+      }
+    ]
+  }
+```
+
+2.  Always execute the entire sequence for every combination.
+Providing an empty list overrides the default behavior as described earlier.
+
+```json
+  "sequence_exploration_settings": {
+    "create_prefix_once": [
+     ]
+  }
+```
+
+3. Do not re-execute the entire sequence for a specific resource.
+```json
+  "sequence_exploration_settings": {
+    "create_prefix_once": [
+      {
+          "methods": ["GET", "PUT", "PATCH"],
+          "endpoints": ["/customer/{customerId}"],
+      }
+    ]
+  }
+
+```
+
+4. Do not re-execute the entire sequence in all cases, except when a successful request deletes or modifies the pre-requisites set up by the previous requests.
+```json
+  "sequence_exploration_settings": {
+    "create_prefix_once": [
+      {
+          "methods": ["GET", "HEAD"],
+          "endpoints": "*",
+          "reset_after_success": false
+      },
+      {
+        "methods": ["PUT", "POST", "PATCH", "DELETE"],
+        "endpoints": "*",
+        "reset_after_success": true
+      }
+    ]
+}
+
+```
+
 
 ### producer_timing_delay: int (default global_producer_timing_delay)
 The per resource producer timing delay, in seconds.
@@ -250,7 +385,7 @@ instead of the default dictionary.
     "per_resource_settings": {
         "/subscriptions/{subscriptionId}/resourceGroups/{resourceGroupName}/providers/Microsoft.Network/dnsZones/{zoneName}/{recordType}/{relativeRecordSetName}": {
             "producer_timing_delay": 1,
-            "create_once": 1
+            "create_once": 1,
             "custom_dictionary": "c:\\restler\\custom_dict1.json"
         },
         "/subscriptions/{subscriptionId}/resourceGroups/{resourceGroupName}/providers/Microsoft.Network/dnsZones/{zoneName}" {

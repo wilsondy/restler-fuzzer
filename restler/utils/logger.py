@@ -16,6 +16,7 @@ from collections import namedtuple
 
 import engine.primitives as primitives
 import engine.dependencies as dependencies
+from restler_settings import Settings
 
 import utils.formatting as formatting
 
@@ -91,6 +92,9 @@ class NetworkLog(object):
         @rtype : None
 
         """
+        if Settings().disable_logging:
+            return
+
         if os.path.getsize(self._current_log_path) > NetworkLog._MaxLogSize:
             # Create a new log if the current log has grown beyond the max size
             self._current_log_num += 1
@@ -206,6 +210,9 @@ class SpecCoverageLog(object):
         @rtype : None
 
         """
+        if Settings().disable_logging:
+            return
+
         from engine.core.requests import FailureInformation
         if rendered_sequence:
             req=rendered_sequence.sequence.last_request
@@ -371,6 +378,8 @@ def write_to_main(data: str, print_to_console: bool=False):
     @return: None
 
     """
+    if Settings().disable_logging:
+        return
     try:
         main_lock.acquire()
         with open(MAIN_LOGS, "a+", encoding='utf-8') as f:
@@ -471,13 +480,9 @@ def custom_network_logging(sequence, candidate_values_pool, **kwargs):
             network_log.write(f"\n\tRequest: {req_i + 1}"
                               " (Current combination: "
                               f"{request._current_combination_id} / {request.num_combinations(candidate_values_pool)})")
-        for request_block in definition:
-            primitive, values, default_val = format_request_block(request.request_id, request_block, candidate_values_pool)
-            if len(values) > 1:
-                network_log.write(f"\t\t+ {primitive}: {values}")
-            else:
-                print_val = values[0] if values else default_val
-                network_log.write(f"\t\t- {primitive}: {print_val!r}")
+
+        print_data = get_rendering_stats_definition(request, candidate_values_pool)
+        network_log.write(print_data)
     network_log.write("")
 
 BugTuple = namedtuple('BugTuple', ['filename_of_replay_log', 'bug_hash', 'reproduce_attempts', 'reproduce_successes'])
@@ -876,23 +881,33 @@ def format_request_block(request_id, request_block, candidate_values_pool):
         values = candidate_values_pool.get_fuzzable_values(primitive, default_val, request_id, quoted=quoted, examples=examples)
     return primitive, values, default_val
 
-def format_rendering_stats_definition(request, candidate_values_pool, log_file=None):
+
+def get_rendering_stats_definition(request, candidate_values_pool, log_file=None, log_all_fuzzable_values=False):
+    print_values=[]
+
     for request_block in request.definition:
         primitive, values, default_val = format_request_block(request.request_id, request_block, candidate_values_pool)
 
-        if len(values) > 1:
-            data = f"\t\t+ {primitive}: {values}"
+        if isinstance(values, list) and len(values) > 1:
+            print_val=values if log_all_fuzzable_values else f"[{values[0]}, {values[1]}, ...]"
+            print_values.append(f"\t\t+ {primitive}: {print_val}")
+        elif isinstance(default_val, list) and len(default_val) > 1:
+            print_val=default_val if log_all_fuzzable_values else f"{default_val[0]}, {default_val[1]}, ...]"
+            print_values.append(f"\t\t- {primitive}: {default_val[:3]}")
         else:
-            data = f"\t\t- {primitive}: {default_val[:100]!r}"
+            print_val = values[0] if values else default_val
+            print_values.append(f"\t\t- {primitive}: {print_val!r}")
 
-        if log_file:
-            print(data, file=log_file)
-        else:
-            write_to_main(data)
+    return "\n".join(print_values)
+
+def format_rendering_stats_definition(request, candidate_values_pool, log_file=None, log_all_fuzzable_values=False):
+    print_data = get_rendering_stats_definition(request, candidate_values_pool, log_file=log_file, log_all_fuzzable_values=log_all_fuzzable_values)
 
     if log_file:
+        print(print_data, file=log_file)
         print("", file=log_file)
     else:
+        write_to_main(print_data)
         write_to_main("")
 
 def print_request_rendering_stats(candidate_values_pool, fuzzing_requests, fuzzing_monitor, num_rendered_requests, generation, global_lock):

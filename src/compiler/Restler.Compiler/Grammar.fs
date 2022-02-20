@@ -111,6 +111,7 @@ type PrimitiveType =
     | Uuid
     | Bool
     | DateTime
+    | Date
     /// The enum type specifies the list of possible enum values
     /// and the default value, if specified.
     /// (tag, data type, possible values, default value if present)
@@ -165,6 +166,26 @@ type CustomPayload =
         dynamicObject: DynamicObject option
     }
 
+type FuzzablePayload =
+    {
+        /// The primitive type of the payload, as declared in the specification
+        primitiveType : PrimitiveType
+
+        /// The default value of the payload
+        defaultValue : string
+
+        /// The example value specified in the spec, if any
+        exampleValue : string option
+
+        /// The parameter name, if available.
+        parameterName : string option
+
+        /// The associated dynamic object, whose value should be
+        /// assigned to the value generated from this payload.
+        /// For example, an input value from a request body property.
+        dynamicObject: DynamicObject option
+    }
+
 /// The payload for a property specified in as a request parameter
 type FuzzingPayload =
     /// Example: (Int "1")
@@ -172,7 +193,7 @@ type FuzzingPayload =
 
     /// (data type, default value, example value, parameter name)
     /// Example: (Int "1", "2")
-    | Fuzzable of PrimitiveType * string * string option * string option
+    | Fuzzable of FuzzablePayload
 
     /// The custom payload, as specified in the fuzzing dictionary
     | Custom of CustomPayload
@@ -205,7 +226,6 @@ type ResourceId =
         resourceName : string
     }
 
-
 type AnnotationResourceReference =
     /// A resource parameter may be obtained by name only
     | ResourceName of string
@@ -213,13 +233,12 @@ type AnnotationResourceReference =
     /// A resource parameter must be obtained in context, via its full path.
     | ResourcePath of AccessPath
 
-/// Using this annotation, dependencies are resolved
-/// Note: the actual producer and consumer must be present, otherwise the annotation is invalid.
 type ProducerConsumerAnnotation =
     {
-        producerId : ResourceId
-        producerParameter : AnnotationResourceReference
-        consumerParameter : AnnotationResourceReference
+        producerId : RequestId
+        consumerId : RequestId option
+        producerParameter : AnnotationResourceReference option
+        consumerParameter : AnnotationResourceReference option
         exceptConsumerId: RequestId list option
     }
 
@@ -314,9 +333,18 @@ type TokenKind =
 
 /// The type of dynamic object variable
 type DynamicObjectVariableKind =
+    /// Dynamic object assigned from a body response property
     | BodyResponseProperty
+
+    /// Dynamic object assigned from a response header
     | Header
+
+    /// Dynamic object assigned from an input parameter or property value
     | InputParameter
+
+    /// A variable specifically created for an ordering constraint,
+    /// which is not included as part of the payload.  (TODO: maybe this is not needed?)
+    | OrderingConstraint
 
 type DynamicObjectWriterVariable =
     {
@@ -333,6 +361,13 @@ type DynamicObjectWriterVariable =
         kind : DynamicObjectVariableKind
     }
 
+type OrderingConstraintVariable =
+    {
+        /// The ID of the producer request
+        sourceRequestId : RequestId
+        targetRequestId : RequestId
+    }
+
 /// Information needed to generate a response parser
 type ResponseParser =
     {
@@ -341,15 +376,30 @@ type ResponseParser =
 
         /// The writer variables returned in the response headers
         headerWriterVariables : DynamicObjectWriterVariable list
+    }
+
+/// Information needed for dependency management
+type RequestDependencyData =
+    {
+        /// The generated response parser.  This is only present if there is at least
+        /// one consumer for a property of the response.
+        responseParser : ResponseParser option
 
         /// The writer variables that are written when the request is sent, and which
         /// are not returned in the response
         inputWriterVariables : DynamicObjectWriterVariable list
+
+        /// The writer variables used for ordering constraints
+        orderingConstraintWriterVariables : OrderingConstraintVariable list
+
+        /// The reader variables used for ordering constraints
+        orderingConstraintReaderVariables : OrderingConstraintVariable list
     }
 
 /// The parts of a request
 type RequestElement =
     | Method of OperationMethod
+    | BasePath of string
     | Path of FuzzingPayload list
     | QueryParameters of RequestParametersPayload
     | HeaderParameters of RequestParametersPayload
@@ -358,7 +408,7 @@ type RequestElement =
     | RefreshableToken
     | Headers of (string * string) list
     | HttpVersion of string
-    | ResponseParser of ResponseParser option
+    | RequestDependencyData of RequestDependencyData option
     | Delimiter
 
 /// The additional metadata of a request that may be used during fuzzing.
@@ -381,6 +431,9 @@ type Request =
         /// The request method, e.g. GET
         method : OperationMethod
 
+        /// The basepath, or an empty string if not specified.
+        basePath : string
+
         path : FuzzingPayload list
 
         queryParameters : (ParameterPayloadSource * RequestParametersPayload) list
@@ -396,12 +449,7 @@ type Request =
 
         httpVersion : string
 
-        /// The generated response parser.  This is only present if there is at least
-        /// one consumer for a property of the response.
-        responseParser : ResponseParser option
-
-        /// The additional dynamic object variables that are not present in the response
-        inputDynamicObjectVariables : DynamicObjectWriterVariable list
+        dependencyData : RequestDependencyData option
 
         /// The additional properties of a request
         requestMetadata : RequestMetadata
@@ -413,51 +461,67 @@ type GrammarDefinition =
         Requests : Request list
     }
 
-let generateDynamicObjectVariableName (requestId:RequestId) (accessPath:AccessPath option) delimiter =
-    // split endpoint, add "id" at the end.  TBD: jobs_0 vs jobs_1 - where is the increment?
-    // See restler_parser.py line 800
-    let replaceTargets = [|"/"; "."; "__"; "{"; "}"; "$"; "-" |]
+module DynamicObjectNaming =
+    let ReplaceTargets = [|"/"; "."; "__"; "{"; "}"; "$"; "-" |]
 
-    let endpointParts = requestId.endpoint.Split(replaceTargets, System.StringSplitOptions.None)
-                        |> Array.toList
+    let generateOrderingConstraintVariableName (sourceRequestId:RequestId) (targetRequestId:RequestId) delimiter =
 
-    let objIdParts =
-        match accessPath with
-        | None -> Array.empty
-        | Some ap -> ap.getPathPartsForName()
-    let objIdParts =
-        objIdParts
-        |> Seq.map (fun part -> part.Split(replaceTargets, System.StringSplitOptions.None))
-        |> Seq.concat
-    let parts = endpointParts
-                @ [(requestId.method.ToString().ToLower())]
-                @ (objIdParts |> Seq.toList)
-    parts |> String.concat delimiter
+        let sourceEndpointParts = sourceRequestId.endpoint.Split(ReplaceTargets, System.StringSplitOptions.None)
 
-let generateIdForCustomUuidSuffixPayload containerName propertyName =
-    let container =
-        if System.String.IsNullOrEmpty(containerName) then
-            ""
+        let targetEndpointParts = targetRequestId.endpoint.Split(ReplaceTargets, System.StringSplitOptions.None)
+
+        let commonEndpointParts, distinctEndpointParts =
+            let zipped = Seq.zip sourceEndpointParts targetEndpointParts
+            zipped |> Seq.takeWhile (fun (x,y) -> x = y) |> Seq.map (fun (x,_) -> x) |> Seq.toList,
+            zipped |> Seq.skipWhile (fun (x,y) -> x = y) |> Seq.toList |> List.unzip
+
+        ["__ordering__"] @ commonEndpointParts @ (fst distinctEndpointParts) @ (snd distinctEndpointParts)
+        |> String.concat delimiter
+
+    let generateDynamicObjectVariableName (requestId:RequestId) (accessPath:AccessPath option) delimiter =
+        // split endpoint, add "id" at the end.  TBD: jobs_0 vs jobs_1 - where is the increment?
+        // See restler_parser.py line 800
+
+        let endpointParts = requestId.endpoint.Split(ReplaceTargets, System.StringSplitOptions.None)
+                            |> Array.toList
+
+        let objIdParts =
+            match accessPath with
+            | None -> Array.empty
+            | Some ap -> ap.getPathPartsForName()
+        let objIdParts =
+            objIdParts
+            |> Seq.map (fun part -> part.Split(ReplaceTargets, System.StringSplitOptions.None))
+            |> Seq.concat
+        let parts = endpointParts
+                    @ [(requestId.method.ToString().ToLower())]
+                    @ (objIdParts |> Seq.toList)
+        parts |> String.concat delimiter
+
+    let generateIdForCustomUuidSuffixPayload containerName propertyName =
+        let container =
+            if System.String.IsNullOrEmpty(containerName) then
+                ""
+            else
+                sprintf "%s_" containerName
+        sprintf "%s%s" container propertyName
+
+    /// Because some services have a strict naming convention on identifiers,
+    /// this function attempts to generate a variable name to avoid violating such constraints
+    /// Note: the unique UUID suffix may still cause problems, which will need to be addressed
+    /// differently in the engine.
+    let generatePrefixForCustomUuidSuffixPayload (suffixPayloadId:string) =
+        /// Use all-lowercase values with at most 10 characters and only letter characters
+        let suffixPayloadIdRestricted =
+            suffixPayloadId
+            |> Seq.filter (fun ch -> System.Char.IsLetter(ch))
+            |> Seq.map (fun ch -> System.Char.ToLower(ch))
+            |> Seq.truncate 10
+        if suffixPayloadIdRestricted |> Seq.isEmpty then
+            // No letter or digit found in variable name.  This is very rare, just use the payload ID in such cases.
+            sprintf "%s" suffixPayloadId
         else
-            sprintf "%s_" containerName
-    sprintf "%s%s" container propertyName
-
-/// Because some services have a strict naming convention on identifiers,
-/// this function attempts to generate a variable name to avoid violating such constraints
-/// Note: the unique UUID suffix may still cause problems, which will need to be addressed
-/// differently in the engine.
-let generatePrefixForCustomUuidSuffixPayload (suffixPayloadId:string) =
-    /// Use all-lowercase values with at most 10 characters and only letter characters
-    let suffixPayloadIdRestricted =
-        suffixPayloadId
-        |> Seq.filter (fun ch -> System.Char.IsLetter(ch))
-        |> Seq.map (fun ch -> System.Char.ToLower(ch))
-        |> Seq.truncate 10
-    if suffixPayloadIdRestricted |> Seq.isEmpty then
-        // No letter or digit found in variable name.  This is very rare, just use the payload ID in such cases.
-        sprintf "%s" suffixPayloadId
-    else
-        sprintf "%s" (suffixPayloadIdRestricted |> Seq.map string |> String.concat "")
+            sprintf "%s" (suffixPayloadIdRestricted |> Seq.map string |> String.concat "")
 
 
 /// This map lists the default primitive values for fuzzable primitives
@@ -467,6 +531,7 @@ let DefaultPrimitiveValues =
         PrimitiveType.String, "fuzzstring" // Note: quotes are intentionally omitted.
         PrimitiveType.Uuid, "566048da-ed19-4cd3-8e0a-b7e0e1ec4d72" // Note: quotes are intentionally omitted.
         PrimitiveType.DateTime, "2019-06-26T20:20:39+00:00" // Note: quotes are intentionally omitted.
+        PrimitiveType.Date, "2019-06-26" // Note: quotes are intentionally omitted.
         PrimitiveType.Number, "1.23" // Note: quotes are intentionally omitted.
         PrimitiveType.Int, "1"
         PrimitiveType.Bool, "true"

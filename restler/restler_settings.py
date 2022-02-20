@@ -305,6 +305,18 @@ MAX_SEQUENCE_LENGTH_DEFAULT = 100
 TARGET_PORT_MAX = (1<<16)-1
 TIME_BUDGET_DEFAULT = 24.0*30 # ~1 month
 
+SEQ_RENDERING_SETTINGS_DEFAULT = {
+    # While fuzzing HEAD and GET request combinations, only render the prefix once.
+    "create_prefix_once": [
+        {
+            "methods": ["GET", "HEAD"],
+            "endpoints": "*",
+            "reset_after_success": False
+        }
+    ]
+}
+
+
 DEFAULT_TEST_SERVER_ID = 'unit_test'
 DEFAULT_VERSION = '0.0.0'
 
@@ -364,6 +376,8 @@ class RestlerSettings(object):
 
         ## Path to Client Cert for Certificate Based Authentication
         self._client_certificate_path = SettingsArg('client_certificate_path', str, None, user_args)
+        ## Path to Client Cert Key for Certificate Based Authentication
+        self._client_certificate_key_path = SettingsArg('client_certificate_key_path', str, None, user_args)
         ## List of endpoints whose resource is to be created only once - Will be set with other per_resource settings
         self._create_once_endpoints = SettingsListArg('create_once', str, None, val_convert=str_to_hex_def)
         ## List of status codes that will be flagged as bugs
@@ -397,6 +411,8 @@ class RestlerSettings(object):
         self._grammar_schema = SettingsArg('grammar_schema', str, None, user_args)
         ## Set to override the Host that's specified in the grammar
         self._host = SettingsArg('host', str, None, user_args)
+        ## Set to override the basepath that's specified in the grammar
+        self._basepath = SettingsArg('basepath', str, None, user_args)
         ##  Ignore request dependencies
         self._ignore_dependencies = SettingsArg('ignore_dependencies', bool, False, user_args)
         ## Ignore server-side feedback
@@ -409,6 +425,8 @@ class RestlerSettings(object):
         self._max_combinations = SettingsArg('max_combinations', int, MAX_COMBINATIONS_DEFAULT, user_args, minval=0)
         ## Settings for advanced combinations testing, such as testing multiple schema combinations
         self._combinations_args = SettingsArg('test_combinations_settings', dict, {}, user_args)
+        ## Settings for caching the sequence prefixes when rendering request combinations
+        self._seq_rendering_settings = SettingsArg('sequence_exploration_settings', dict, {}, user_args)
         ## Maximum time to wait for a response after sending a request (seconds)
         self._max_request_execution_time = SettingsArg('max_request_execution_time', (int, float), MAX_REQUEST_EXECUTION_TIME_DEFAULT, user_args, minval=0, min_exactok=False, maxval=MAX_REQUEST_EXECUTION_TIME_MAX)
         ## Maximum length of any sequence
@@ -423,6 +441,8 @@ class RestlerSettings(object):
         self._path_regex = SettingsArg('path_regex', str, None, user_args)
         ## Minimum time, in milliseconds, to wait between sending requests
         self._request_throttle_ms = SettingsArg('request_throttle_ms', (int, float), None, user_args, minval=0)
+        ## Settings for customizing re-try logic for requests
+        self._retry_args = SettingsArg('custom_retry_settings', dict, {}, user_args)
         ## Ignore data UTF decoding failures (see https://github.com/microsoft/restler-fuzzer/issues/164)
         self._ignore_decoding_failures = SettingsArg('ignore_decoding_failures', bool, False, user_args)
         ## Collection of endpoint specific producer timing delays - will be set with other per_resource settings
@@ -439,6 +459,10 @@ class RestlerSettings(object):
         self._test_server = SettingsArg('test_server', str, DEFAULT_TEST_SERVER_ID, user_args)
         ## Stops fuzzing after given time (hours)
         self._time_budget = SettingsArg('time_budget', (int, float), TIME_BUDGET_DEFAULT, user_args, minval=0)
+        ## Disable the network logs and main.txt
+        self._disable_logging = SettingsArg('disable_logging', bool, False, user_args)
+        ## Add current dates in addition to the ones specified in the dictionary
+        self._add_fuzzable_dates = SettingsArg('add_fuzzable_dates', bool, False, user_args)
         ## The command to execute in order to refresh the authentication token
         self._token_refresh_cmd = SettingsArg('token_refresh_cmd', str, None, user_args)
         ## Interval to periodically refresh the authentication token (seconds)
@@ -465,8 +489,16 @@ class RestlerSettings(object):
         return self
 
     @property
+    def disable_logging(self):
+        return self._disable_logging.val
+
+    @property
     def client_certificate_path(self):
         return self._client_certificate_path.val
+
+    @property
+    def client_certificate_key_path(self):
+        return self._client_certificate_key_path.val
 
     @property
     def connection_settings(self):
@@ -515,6 +547,10 @@ class RestlerSettings(object):
     @property
     def host(self):
         return self._host.val
+
+    @property
+    def basepath(self):
+        return self._basepath.val
 
     @property
     def ignore_dependencies(self):
@@ -575,6 +611,24 @@ class RestlerSettings(object):
         return self._request_throttle_ms.val
 
     @property
+    def custom_retry_codes(self):
+        if 'status_codes' in self._retry_args.val:
+            return self._retry_args.val['status_codes']
+        return None
+
+    @property
+    def custom_retry_text(self):
+        if 'response_text' in self._retry_args.val:
+            return self._retry_args.val['response_text']
+        return None
+
+    @property
+    def custom_retry_interval_sec(self):
+        if 'interval_sec' in self._retry_args.val:
+            return self._retry_args.val['interval_sec']
+        return None
+
+    @property
     def ignore_decoding_failures(self):
         return self._ignore_decoding_failures.val
 
@@ -595,6 +649,10 @@ class RestlerSettings(object):
         return self._time_budget.val
 
     @property
+    def add_fuzzable_dates(self):
+        return self._add_fuzzable_dates.val
+
+    @property
     def token_refresh_cmd(self):
         return self._token_refresh_cmd.val
 
@@ -609,6 +667,31 @@ class RestlerSettings(object):
     @property
     def wait_for_async_resource_creation(self):
         return self._wait_for_async_resource_creation.val
+
+    def get_cached_prefix_request_settings(self, endpoint, method):
+        def get_settings():
+            if 'create_prefix_once' in self._seq_rendering_settings.val:
+                return self._seq_rendering_settings.val['create_prefix_once']
+            return SEQ_RENDERING_SETTINGS_DEFAULT['create_prefix_once']
+
+        prefix_cache_settings = get_settings()
+
+        # Find the settings matching the request endpoint, then check whether they include the request method.
+        endpoint_settings = list(filter(lambda x : 'endpoints' in x and \
+                                                    (x['endpoints'] == "*" or endpoint in x['endpoints']),
+                                    prefix_cache_settings))
+        req_settings = list(filter(lambda x : 'methods' in x and \
+                                                    (x['methods'] == "*" or method.upper() in x['methods']),
+                                    endpoint_settings))
+
+        create_prefix_once = False
+        re_render_prefix_on_success = None
+        if len(req_settings) > 0:
+            create_prefix_once = True
+            re_render_prefix_on_success = False
+            if 'reset_after_success' in req_settings[0]:
+                re_render_prefix_on_success = req_settings[0]['reset_after_success']
+        return create_prefix_once, re_render_prefix_on_success
 
     def _set_per_resource_args(self, args: dict):
         """ Sets the per-resource settings

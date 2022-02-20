@@ -51,9 +51,8 @@ type UserSpecifiedRequestConfig =
     }
 
 let getWriterVariable (producer:Producer) (kind:DynamicObjectVariableKind) =
-
     match producer with
-    | InputParameter (iop, _) ->
+    | InputParameter (iop, _, _) ->
         {
             requestId = iop.id.RequestId
             accessPathParts = iop.getInputParameterAccessPath()
@@ -80,13 +79,50 @@ let getWriterVariable (producer:Producer) (kind:DynamicObjectVariableKind) =
     | _ ->
         raise (invalidArg "producer" "only input parameter and response producers have an associated dynamic object")
 
-let getResponseParsers (dependencies:seq<ProducerConsumerDependency>) =
+let getResponseParsers (dependencies:seq<ProducerConsumerDependency>) (orderingConstraints:(RequestId * RequestId) list) =
     // Index the dependencies by request ID.
-    let parsers = new Dictionary<RequestId, ResponseParser>()
+    let parsers = new Dictionary<RequestId, RequestDependencyData>()
 
    // Generate the parser for all the consumer variables (Note this means we need both producer
-    // and consumer pairs.  A response parser is only generated if there is a consumer for one or more of the
-    // response properties.)
+   // and consumer pairs.  A response parser is only generated if there is a consumer for one or more of the
+   // response properties.)
+
+    /// Make sure the grammar will be stable by sorting the variables.
+    let getVariables variableMap variableKind =
+        match variableMap |> Map.tryFind variableKind with
+        | None -> []
+        | Some x ->
+            x |> Seq.toList
+              |> List.sortBy (fun (writerVariable:DynamicObjectWriterVariable) ->
+                                writerVariable.requestId.endpoint,
+                                writerVariable.requestId.method,
+                                writerVariable.accessPathParts.getJsonPointer().Value)
+
+    let getOrderingConstraintVariables constraints =
+        constraints
+        |> List.distinct
+        |> List.map (fun (source, target) ->
+                        { OrderingConstraintVariable.sourceRequestId = source
+                          targetRequestId = target })
+
+    // First, add all of the requests for which an ordering constraint exists
+    orderingConstraints
+    |> Seq.fold (fun reqs (source,target) -> [source ; target] @ reqs) []
+    |> Seq.distinct
+    |> Seq.iter (fun requestId ->
+                    let dependencyInfo =
+                        {
+                            responseParser = None
+                            inputWriterVariables = []
+
+                            orderingConstraintWriterVariables =
+                                orderingConstraints |> List.filter (fun (source,_) -> requestId = source)
+                                                    |> getOrderingConstraintVariables
+                            orderingConstraintReaderVariables =
+                                orderingConstraints |> List.filter (fun (_,target) -> requestId = target)
+                                                    |> getOrderingConstraintVariables
+                        }
+                    parsers.Add(requestId, dependencyInfo))
 
     dependencies
     |> Seq.filter (fun dep -> dep.producer.IsSome)
@@ -97,7 +133,7 @@ let getResponseParsers (dependencies:seq<ProducerConsumerDependency>) =
                             match ro.id.ResourceReference with
                             | HeaderResource _ -> Some DynamicObjectVariableKind.Header
                             | _ -> Some DynamicObjectVariableKind.BodyResponseProperty
-                        | InputParameter (_, _) ->
+                        | InputParameter (_, _,_) ->
                             Some DynamicObjectVariableKind.InputParameter
                         | _ -> None
                     match writerVariableKind with
@@ -111,28 +147,40 @@ let getResponseParsers (dependencies:seq<ProducerConsumerDependency>) =
     |> Seq.groupBy (fun writerVariable -> writerVariable.requestId)
     |> Map.ofSeq
     |> Map.iter (fun requestId allWriterVariables ->
+                    let prevDependencyInfo =
+                        match parsers.TryGetValue(requestId) with
+                        | false, _ -> None
+                        | true, di -> Some di
+
                     let groupedWriterVariables = allWriterVariables |> Seq.groupBy (fun x -> x.kind)
                                                  |> Map.ofSeq
-                    let parser =
+
+                    let responseParser =
                         {
-                            writerVariables =
-                                match groupedWriterVariables |> Map.tryFind DynamicObjectVariableKind.BodyResponseProperty with
+                            writerVariables = getVariables groupedWriterVariables DynamicObjectVariableKind.BodyResponseProperty
+                            headerWriterVariables = getVariables groupedWriterVariables DynamicObjectVariableKind.Header
+                        }
+                    let dependencyInfo =
+                        {
+                            responseParser = Some responseParser
+                            inputWriterVariables = getVariables groupedWriterVariables DynamicObjectVariableKind.InputParameter
+                            orderingConstraintWriterVariables =
+                                match prevDependencyInfo with
+                                | Some d -> d.orderingConstraintWriterVariables
                                 | None -> []
-                                | Some x -> x |> Seq.toList
-                            inputWriterVariables =
-                                match groupedWriterVariables |> Map.tryFind DynamicObjectVariableKind.InputParameter with
+                            orderingConstraintReaderVariables =
+                                match prevDependencyInfo with
+                                | Some d -> d.orderingConstraintReaderVariables
                                 | None -> []
-                                | Some x -> x |> Seq.toList
-
-                            headerWriterVariables =
-                                match groupedWriterVariables |> Map.tryFind DynamicObjectVariableKind.Header with
-                                | None -> []
-                                | Some x -> x |> Seq.toList
-
                         }
 
-                    parsers.Add(requestId, parser))
+                    if prevDependencyInfo.IsSome then
+                        parsers.Remove(requestId) |> ignore
+
+                    parsers.Add(requestId, dependencyInfo))
     parsers
+    |> Seq.map (fun k -> (k.Key,k.Value))
+    |> Map.ofSeq
 
 module ResourceUriInferenceFromExample =
     let tryGetExamplePayload payload =
@@ -223,42 +271,61 @@ module private Parameters =
         // If the declared parameter is the body, then also look for the special keyword denoting
         // a body parameter in examples
         let bodyName = "__body__"
-        let exampleParameters =
+
+        let exampleParametersFromSpec =
             parameterList
             |> Seq.choose
                 (fun declaredParameter ->
-                            // If the declared parameter isn't in the example, skip it.  Here, the example is used to
-                            // select which parameters must be passed to the API.
-                            let foundParameter =
-                                match examplePayload.parameterExamples
-                                      |> List.tryFind (fun r -> r.parameterName = declaredParameter.Name) with
-                                | Some p -> Some p
-                                | None when declaredParameter.Kind = OpenApiParameterKind.Body ->
-                                    examplePayload.parameterExamples
-                                    |> List.tryFind (fun r -> r.parameterName = bodyName)
-                                | None -> None
-                            match foundParameter with
+                        // If the declared parameter isn't in the example, skip it.  Here, the example is used to
+                        // select which parameters must be passed to the API.
+                        let foundParameter =
+                            match examplePayload.parameterExamples
+                                    |> List.tryFind (fun r -> r.parameterName = declaredParameter.Name) with
+                            | Some p -> Some p
+                            | None when declaredParameter.Kind = OpenApiParameterKind.Body ->
+                                examplePayload.parameterExamples
+                                |> List.tryFind (fun r -> r.parameterName = bodyName)
                             | None -> None
-                            | Some found ->
-                                match found.payload with
-                                | PayloadFormat.JToken payloadValue ->
+
+                        match foundParameter with
+                        | None -> None
+                        | Some found ->
+                            match found.payload with
+                            | PayloadFormat.JToken payloadValue ->
+                                if examplePayload.exactCopy then
+                                    let payload =
+                                        let primitiveType =
+                                            match payloadValue.Type with
+                                            | JTokenType.Array
+                                            | JTokenType.Object ->
+                                                PrimitiveType.Object
+                                            | _ ->
+                                                PrimitiveType.String
+                                        let formattedPayloadValue = GenerateGrammarElements.formatJTokenProperty primitiveType payloadValue
+                                        Constant (primitiveType, formattedPayloadValue)
+
+                                    Some { name = declaredParameter.Name
+                                           payload = LeafNode { LeafProperty.name = ""
+                                                                payload = payload
+                                                                isReadOnly = (parameterIsReadOnly declaredParameter)
+                                                                isRequired = declaredParameter.IsRequired }
+                                           serialization = None }
+                                else
                                     let parameterGrammarElement =
                                         generateGrammarElementForSchema declaredParameter.ActualSchema
-                                                                        (Some payloadValue, false) trackParameters
+                                                                        (Some payloadValue, false)
+                                                                        (trackParameters, None)
                                                                         (declaredParameter.IsRequired, (parameterIsReadOnly declaredParameter))
                                                                         []
+                                                                        (SchemaCache())
                                                                         id
                                     Some { name = declaredParameter.Name
                                            payload = parameterGrammarElement
                                            serialization = getParameterSerialization declaredParameter }
                 )
+            |> Seq.toList
 
-        examplePayload.parameterExamples
-        |> List.filter (fun exampleParameter ->
-                            exampleParameter.parameterName <> bodyName &&
-                            parameterList |> Seq.tryFind (fun dp -> dp.Name = exampleParameter.parameterName) = None)
-        |> List.iter (fun p -> printfn "Warning: example parameter not found in spec: %s" p.parameterName)
-        exampleParameters
+        exampleParametersFromSpec
 
     // Gets the first example found from the open API parameter:
     // The priority is:
@@ -357,11 +424,22 @@ module private Parameters =
                                        | Some parameter ->
                                             let serialization = getParameterSerialization parameter
                                             let schema = parameter.ActualSchema
-                                           // Check for path examples in the Swagger specification
-                                           // External path examples are not currently supported
-                                            match exampleConfig with
-                                            | None
-                                            | Some [] ->
+                                            // Check for path examples in the Swagger specification
+                                            // External path examples are not currently supported
+
+                                            let parameterValueFromExample =
+                                               match exampleConfig with
+                                               | None
+                                               | Some [] ->
+                                                    None
+                                               | Some (firstExample::remainingExamples) ->
+                                                    // Use the first example specified to determine the parameter value.
+                                                    getParametersFromExample firstExample (parameter |> stn) trackParameters
+                                                    |> Seq.tryHead
+
+                                            if parameterValueFromExample.IsSome then
+                                                parameterValueFromExample
+                                            else
                                                 let leafProperty =
                                                      if schema.IsArray then
                                                          raise (Exception("Arrays in path examples are not supported yet."))
@@ -378,18 +456,14 @@ module private Parameters =
                                                 Some { name = parameterName
                                                        payload = LeafNode leafProperty
                                                        serialization = serialization }
-                                            | Some (firstExample::remainingExamples) ->
-                                                // Use the first example specified to determine the parameter value.
-                                                getParametersFromExample firstExample (parameter |> stn) trackParameters
-                                                |> Seq.head
-                                                |> Some
                             )
         ParameterList parameterList
 
     let private getParameters (parameterList:seq<OpenApiParameter>)
                               (exampleConfig:ExampleRequestPayload list option)
                               (dataFuzzing:bool)
-                              (trackParameters:bool) =
+                              (trackParameters:bool)
+                              (jsonPropertyMaxDepth:int option) =
 
         // When data fuzzing is specified, both the full schema and examples should be available for analysis.
         // Otherwise, use the first example if it exists, or the schema, and return a single schema.
@@ -417,9 +491,10 @@ module private Parameters =
                                     let parameterPayload = generateGrammarElementForSchema
                                                                 p.ActualSchema
                                                                 (specExampleValue, true)
-                                                                trackParameters
+                                                                (trackParameters, jsonPropertyMaxDepth)
                                                                 (p.IsRequired, (parameterIsReadOnly p))
                                                                 []
+                                                                (SchemaCache())
                                                                 id
 
                                     // Add the name to the parameter payload
@@ -427,11 +502,16 @@ module private Parameters =
                                         match parameterPayload with
                                         | LeafNode leafProperty ->
                                             let leafNodePayload =
+
                                                 match leafProperty.payload with
-                                                | Fuzzable (Enum(propertyName, propertyType, values, defaultValue), x, y, z) ->
-                                                    Fuzzable (Enum(p.Name, propertyType, values, defaultValue), x, y, z)
-                                                | Fuzzable (a, b, c, _) ->
-                                                    Fuzzable (a, b, c, if trackParameters then Some p.Name else None)
+                                                | Fuzzable fp ->
+                                                    match fp.primitiveType with
+                                                    | Enum(propertyName, propertyType, values, defaultValue) ->
+                                                        let primitiveType = PrimitiveType.Enum(p.Name, propertyType, values, defaultValue)
+                                                        Fuzzable { fp with primitiveType = primitiveType }
+                                                    | _ ->
+                                                        Fuzzable {fp with
+                                                                    parameterName = if trackParameters then Some p.Name else None }
                                                 | _ -> leafProperty.payload
                                             LeafNode { leafProperty with payload = leafNodePayload }
                                         | InternalNode (internalNode, children) ->
@@ -462,9 +542,52 @@ module private Parameters =
     let getAllParameters (swaggerMethodDefinition:OpenApiOperation)
                          (parameterKind:NSwag.OpenApiParameterKind)
                          exampleConfig dataFuzzing
-                         trackParameters =
+                         trackParameters
+                         jsonPropertyMaxDepth =
         let allParameters = getSpecParameters swaggerMethodDefinition parameterKind
-        getParameters allParameters exampleConfig dataFuzzing trackParameters
+        getParameters allParameters exampleConfig dataFuzzing trackParameters jsonPropertyMaxDepth
+
+    let getBody (swaggerMethodDefinition:OpenApiOperation)
+                exampleConfig dataFuzzing
+                trackParameters
+                jsonPropertyMaxDepth =
+        let bodyName = "__body__"
+
+        let bodyName, bodySchema =
+            if not (isNull swaggerMethodDefinition.RequestBody) &&
+                not (isNull swaggerMethodDefinition.RequestBody.Content) then
+                let content =
+                    swaggerMethodDefinition.RequestBody.Content |> Seq.tryFind (fun x -> x.Key = "application/json")
+                // If the schema is null, issue a warning.
+                match content with
+                | Some c ->
+                    let bodyName =
+                        if not (String.IsNullOrEmpty(swaggerMethodDefinition.RequestBody.Name)) then
+                            swaggerMethodDefinition.RequestBody.Name
+                        else
+                            bodyName
+                    if isNull c.Value.Schema then
+                        printfn "Error: found body (%s) with null schema.  This may be due to an invalid OpenAPI spec." bodyName
+                        bodyName, None
+                    else
+                        bodyName, Some c.Value.Schema.ActualSchema
+                | None -> bodyName, None
+            else
+                let parameter = getSpecParameters swaggerMethodDefinition OpenApiParameterKind.Body |> Seq.tryHead
+                match parameter with
+                | None -> bodyName, None
+                | Some p -> p.Name, Some p.ActualSchema
+
+        if bodySchema.IsSome then
+            let openApiParameter = OpenApiParameter()
+            openApiParameter.Name <- bodyName
+            openApiParameter.Schema <- bodySchema.Value
+            openApiParameter.Kind <- OpenApiParameterKind.Body
+            openApiParameter.IsRequired <- true
+            getParameters (openApiParameter |> stn) exampleConfig dataFuzzing trackParameters jsonPropertyMaxDepth
+        else
+            // No body
+            getParameters Seq.empty exampleConfig dataFuzzing trackParameters jsonPropertyMaxDepth
 
 /// Functionality related to x-ms-paths support.  For more information, see:
 /// https://github.com/stankovski/AutoRest/blob/master/Documentation/swagger-extensions.md#x-ms-paths
@@ -557,14 +680,56 @@ module private XMsPaths =
                                 (payloadSource, requestParameterPayload))
         queryParametersFiltered
 
+/// Given a list of the parameters found in the spec and the dictionary,
+/// determines which additional injected parameters are specified in the dictionary
+/// and creates the corresponding payloads.
+let private getInjectedCustomPayloadParameters (dictionary:MutationsDictionary) customPayloadType parametersFoundInSpec =
+    let parameterNames =
+        let parameterNamesSpecifiedAsCustomPayloads =
+            match customPayloadType with
+            | CustomPayloadType.Header ->
+                dictionary.getCustomPayloadHeaderParameterNames()
+            | CustomPayloadType.Query ->
+                dictionary.getCustomPayloadQueryParameterNames()
+            | _ ->
+                raise (invalidArg "customPayloadType" (sprintf "%A is not supported in this context." customPayloadType))
+        parameterNamesSpecifiedAsCustomPayloads
+        |> Seq.filter (fun name -> not (parametersFoundInSpec |> List.contains name))
+
+    parameterNames
+        |> Seq.map (fun headerName ->
+                        let newParameter =
+                            {
+                                RequestParameter.name = headerName
+                                serialization = None
+                                payload =
+                                    Tree.LeafNode
+                                        {
+                                            LeafProperty.name = ""
+                                            LeafProperty.payload =
+                                                FuzzingPayload.Custom
+                                                    {
+                                                        payloadType = customPayloadType
+                                                        primitiveType = PrimitiveType.String
+                                                        payloadValue = headerName
+                                                        isObject = false
+                                                        dynamicObject = None
+                                                    }
+                                            LeafProperty.isRequired = true
+                                            LeafProperty.isReadOnly = false
+                                        }}
+                        newParameter)
+            |> Seq.toList
+
 let generateRequestPrimitives (requestId:RequestId)
-                               (responseParser:ResponseParser option)
+                               (dependencyData:RequestDependencyData option)
                                (requestParameters:RequestParameters)
                                (dependencies:Dictionary<string, List<ProducerConsumerDependency>>)
-                               basePath
+                               (basePath:string)
                                (host:string)
                                (resolveQueryDependencies:bool)
                                (resolveBodyDependencies:bool)
+                               (resolveHeaderDependencies:bool)
                                (dictionary:MutationsDictionary)
                                (requestMetadata:RequestMetadata) =
     let method = requestId.method
@@ -588,9 +753,11 @@ let generateRequestPrimitives (requestId:RequestId)
             |> Map.ofSeq
         | _ -> raise (UnsupportedType "Only a list of query parameters is supported.")
 
+
     let path =
-        (basePath + requestId.endpoint).Split([|'/'|], StringSplitOptions.RemoveEmptyEntries)
-        |> Array.choose (fun p ->
+        let pathParts =
+            requestId.endpoint.Split([|'/'|], StringSplitOptions.RemoveEmptyEntries)
+            |> Array.choose (fun p ->
                             if Parameters.isPathParameter p then
                                 let consumerResourceName = Parameters.getPathParameterName p
                                 let declaredParameter =
@@ -621,7 +788,8 @@ let generateRequestPrimitives (requestId:RequestId)
                             else
                                 Some (Constant (PrimitiveType.String, p))
                       )
-        |> Array.toList
+            |> Array.toList
+        pathParts
 
     let replaceCustomPayloads customPayloadType customPayloadParameterNames (requestParameter:RequestParameter) =
         if customPayloadParameterNames |> Seq.contains requestParameter.name then
@@ -653,35 +821,53 @@ let generateRequestPrimitives (requestId:RequestId)
 
     // Generate header parameters.
     // Do not compute dependencies for header parameters.
-    let headerParameters, replacedCustomPayloadHeaders =
+    let requestHeaderParameters =
         let headersSpecifiedAsCustomPayloads = dictionary.getCustomPayloadHeaderParameterNames()
-        requestParameters.header
-        |> List.mapFold (fun newReplacedPayloadHeaders (payloadSource, requestHeaders) ->
-                            let newParameterList =
-                                // The grammar should always have examples, if they exist here,
-                                // which implies that 'useExamples' was specified by the user.
-                                match requestHeaders with
-                                | ParameterList parameterList ->
-                                    // Filter out the headers specified as custom payloads.
-                                    // They will be added separately.
+        match requestParameters.header with
+        | [] ->
+            // Filter out Content-Type, because this is handled separately below
+            let injectedCustomPayloadHeaderParameters = getInjectedCustomPayloadParameters dictionary CustomPayloadType.Header ["Content-Type"]
+            [(ParameterPayloadSource.DictionaryCustomPayload, ParameterList (injectedCustomPayloadHeaderParameters |> seq))]
+        | _ ->
+            requestParameters.header
+            |> List.map
+                (fun (payloadSource, requestHeaders) ->
+                        let parameterList =
+                            match requestHeaders with
+                            | ParameterList parameterList ->
+                                if resolveHeaderDependencies then
                                     parameterList
-                                    // Filter out the 'Content-Length' parameter if it is specified in the spec.
-                                    // This parameter must be computed by the engine, and should not be fuzzed.
-                                    |> Seq.filter (fun rp -> rp.name <> "Content-Length")
-                                    |> Seq.map (fun requestParameter ->
-                                                    replaceCustomPayloads CustomPayloadType.Header headersSpecifiedAsCustomPayloads requestParameter)
-                                | _ -> raise (UnsupportedType "Only a list of header parameters is supported.")
-                            let parameterList =
-                                newParameterList |> Seq.map fst |> Seq.toList
-                            let replacedPayloadHeaders =
-                                newParameterList
-                                |> Seq.filter (fun (_, isReplaced) -> isReplaced)
-                                |> Seq.map (fun (p,_) -> p.name)
-                                |> Seq.toList
-                            (payloadSource, ParameterList parameterList),
-                            [ replacedPayloadHeaders ; newReplacedPayloadHeaders ]
-                            |> List.concat
-                         ) []
+                                    |> Seq.map (fun p ->
+                                                    let newPayload, _ =
+                                                        Restler.Dependencies.DependencyLookup.getDependencyPayload
+                                                                            dependencies
+                                                                            None
+                                                                            requestId
+                                                                            p
+                                                                            dictionary
+                                                    newPayload)
+                                else parameterList
+                            | _ -> raise (UnsupportedType "Only a list of header parameters is supported.")
+
+
+                        let parameterList =
+                            parameterList
+                            // Filter out the 'Content-Length' parameter if it is specified in the spec.
+                            // This parameter must be computed by the engine, and should not be fuzzed.
+                            |> Seq.filter (fun rp -> rp.name <> "Content-Length")
+                            |> Seq.map (fun requestParameter ->
+                                            replaceCustomPayloads CustomPayloadType.Header headersSpecifiedAsCustomPayloads requestParameter
+                                            |> fst )
+
+                        let specHeaderParameterNames =
+                            parameterList
+                            |> Seq.map (fun p -> p.name)
+                            |> Seq.toList
+
+                        // Get the additional custom payload query parameters that should be injected
+                        let injectedCustomPayloadQueryParameters = getInjectedCustomPayloadParameters dictionary CustomPayloadType.Header specHeaderParameterNames
+                        let allHeaderParameters = [ parameterList ; injectedCustomPayloadQueryParameters |> seq ] |> Seq.concat
+                        payloadSource, ParameterList allHeaderParameters)
 
     // Special case for endpoints in x-ms-paths:
     // handle query parameters present in the path. This must be done after the path payload has been determined above,
@@ -695,13 +881,15 @@ let generateRequestPrimitives (requestId:RequestId)
     // Assign dynamic objects to query parameters if they have dependencies.
     // When there is more than one parameter set, the dictionary must be the one for the schema.
     //
-    let queryParameters, replacedCustomPayloadQueries =
-        let queriesSpecifiedAsCustomPayloads = dictionary.getCustomPayloadQueryParameterNames()
-        requestQueryParameters
-        |> List.mapFold (fun newReplacedPayloadQueries (payloadSource, requestQuery) ->
+    let requestQueryParameters =
+        match requestQueryParameters with
+        | [] ->
+            let injectedCustomPayloadQueryParameters = getInjectedCustomPayloadParameters dictionary CustomPayloadType.Query []
+            [(ParameterPayloadSource.DictionaryCustomPayload, ParameterList (injectedCustomPayloadQueryParameters |> seq))]
+        | _ ->
+            requestQueryParameters
+            |> List.map (fun (payloadSource, requestQuery) ->
                             let parameterList =
-                                // The grammar should always have examples, if they exist here,
-                                // which implies that 'useExamples' was specified by the user.
                                 match requestQuery with
                                 | ParameterList parameterList ->
                                     if resolveQueryDependencies then
@@ -718,16 +906,15 @@ let generateRequestPrimitives (requestId:RequestId)
                                     else parameterList
                                 | _ -> raise (UnsupportedType "Only a list of query parameters is supported.")
 
-                            let replacedPayloadQueries =
+                            let specQueryParameterNames =
                                 parameterList
-                                |> Seq.filter (fun p -> queriesSpecifiedAsCustomPayloads |> Seq.contains p.name)
                                 |> Seq.map (fun p -> p.name)
                                 |> Seq.toList
 
-                            (payloadSource, ParameterList parameterList),
-                            [ replacedPayloadQueries ; newReplacedPayloadQueries ]
-                            |> List.concat
-                         ) []
+                            // Get the additional custom payload query parameters that should be injected
+                            let injectedCustomPayloadQueryParameters = getInjectedCustomPayloadParameters dictionary CustomPayloadType.Query specQueryParameterNames
+                            let allQueryParameters = [ parameterList ; injectedCustomPayloadQueryParameters |> seq ] |> Seq.concat
+                            payloadSource, ParameterList allQueryParameters)
 
     let bodyParameters, newDictionary =
         // Check if the body is being replaced by a custom payload
@@ -837,69 +1024,23 @@ let generateRequestPrimitives (requestId:RequestId)
             [ contentType ]
         else []
 
-    let getCustomPayloadParameters customPayloadType parametersFoundInSpec =
-        let parameterNames =
-            let parameterNamesSpecifiedAsCustomPayloads =
-                match customPayloadType with
-                | CustomPayloadType.Header ->
-                    dictionary.getCustomPayloadHeaderParameterNames()
-                | CustomPayloadType.Query ->
-                    dictionary.getCustomPayloadQueryParameterNames()
-                | _ ->
-                    raise (invalidArg "customPayloadType" (sprintf "%A is not supported in this context." customPayloadType))
-            parameterNamesSpecifiedAsCustomPayloads
-            |> Seq.filter (fun name -> not (parametersFoundInSpec |> List.contains name))
-
-        parameterNames
-            |> Seq.map (fun headerName ->
-                            let newParameter =
-                                {
-                                    RequestParameter.name = headerName
-                                    serialization = None
-                                    payload =
-                                        Tree.LeafNode
-                                            {
-                                                LeafProperty.name = ""
-                                                LeafProperty.payload =
-                                                    FuzzingPayload.Custom
-                                                        {
-                                                            payloadType = customPayloadType
-                                                            primitiveType = PrimitiveType.String
-                                                            payloadValue = headerName
-                                                            isObject = false
-                                                            dynamicObject = None
-                                                        }
-                                                LeafProperty.isRequired = true
-                                                LeafProperty.isReadOnly = false
-                                            }}
-                            newParameter)
-                |> Seq.toList
-
-    let customPayloadHeaderParameters = getCustomPayloadParameters CustomPayloadType.Header replacedCustomPayloadHeaders
-
-    // Note: only injecting custom payload query parameters is supported at this time.
-    // For replacement, restler_custom_payload should be used.
-    let customPayloadQueryParameters = getCustomPayloadParameters CustomPayloadType.Query replacedCustomPayloadQueries
-
     let headers =
         ([ ("Accept", "application/json")
            ("Host", host)])
     {
         id = requestId
         Request.method = method
+        Request.basePath = basePath
         Request.path = path
-        queryParameters = queryParameters @
+        queryParameters = requestQueryParameters
+        headerParameters = requestHeaderParameters @
                                 [(ParameterPayloadSource.DictionaryCustomPayload,
-                                  RequestParametersPayload.ParameterList customPayloadQueryParameters)]
-        headerParameters = headerParameters @
-                                [(ParameterPayloadSource.DictionaryCustomPayload,
-                                  RequestParametersPayload.ParameterList (contentTypeHeader @ customPayloadHeaderParameters))]
+                                  RequestParametersPayload.ParameterList contentTypeHeader)]
         httpVersion = "1.1"
         headers = headers
         token = TokenKind.Refreshable
         bodyParameters = bodyParameters
-        responseParser  = responseParser
-        inputDynamicObjectVariables = if responseParser.IsSome then responseParser.Value.inputWriterVariables else []
+        dependencyData = dependencyData
         requestMetadata = requestMetadata
     },
     newDictionary
@@ -909,9 +1050,10 @@ let generateRequestGrammar (swaggerDocs:Types.ApiSpecFuzzingConfig list)
                            (dictionary:MutationsDictionary)
                            (config:Restler.Config.Config)
                            (globalExternalAnnotations: ProducerConsumerAnnotation list)
-                           (userSpecifiedExamples:ExampleConfigFile option) =
+                           (userSpecifiedExamples:ExampleConfigFile list) =
 
     let getRequestData (swaggerDoc:OpenApiDocument) (xMsPathsMapping:Map<string,string> option) =
+        let schemaCache = SchemaCache()
         let requestDataSeq = seq {
             for path in swaggerDoc.Paths do
                 let ep = path.Key.TrimEnd([|'/'|])
@@ -943,7 +1085,10 @@ let generateRequestGrammar (swaggerDocs:Types.ApiSpecFuzzingConfig list)
                         let useExamples =
                             usePathExamples || useBodyExamples || useQueryExamples || useHeaderExamples
                         if useExamples || config.DiscoverExamples then
-                            let exampleRequestPayloads = getExampleConfig (ep,m.Key) m.Value config.DiscoverExamples config.ExamplesDirectory userSpecifiedExamples
+                            let exampleRequestPayloads = getExampleConfig (ep,m.Key) m.Value config.DiscoverExamples
+                                                                          config.ExamplesDirectory
+                                                                          userSpecifiedExamples
+                                                                          (config.UseAllExamplePayloads |> Option.defaultValue false)
                             // If 'discoverExamples' is specified, create a local copy in the specified examples directory for
                             // all the examples found.
                             if config.DiscoverExamples then
@@ -977,6 +1122,7 @@ let generateRequestGrammar (swaggerDocs:Types.ApiSpecFuzzingConfig list)
                                 (if useQueryExamples then exampleConfig else None)
                                 config.DataFuzzing
                                 config.TrackFuzzedParameterNames
+                                config.JsonPropertyMaxDepth
 
                         let pathParameters =
                             let usePathExamples =
@@ -985,6 +1131,16 @@ let generateRequestGrammar (swaggerDocs:Types.ApiSpecFuzzingConfig list)
                                     m.Value ep
                                     (if usePathExamples then exampleConfig else None)
                                     config.TrackFuzzedParameterNames
+                        let body =
+                            let useBodyExamples =
+                                config.UseBodyExamples |> Option.defaultValue false
+                            Parameters.getBody
+                                m.Value
+                                (if useBodyExamples then exampleConfig else None)
+                                config.DataFuzzing
+                                config.TrackFuzzedParameterNames
+                                config.JsonPropertyMaxDepth
+
                         let requestParameters =
                             {
                                 RequestParameters.path = pathParameters
@@ -998,16 +1154,9 @@ let generateRequestGrammar (swaggerDocs:Types.ApiSpecFuzzingConfig list)
                                         (if useHeaderExamples then exampleConfig else None)
                                         config.DataFuzzing
                                         config.TrackFuzzedParameterNames
+                                        config.JsonPropertyMaxDepth
                                 RequestParameters.query = allQueryParameters
-                                RequestParameters.body =
-                                    let useBodyExamples =
-                                        config.UseBodyExamples |> Option.defaultValue false
-                                    Parameters.getAllParameters
-                                        m.Value
-                                        OpenApiParameterKind.Body
-                                        (if useBodyExamples then exampleConfig else None)
-                                        config.DataFuzzing
-                                        config.TrackFuzzedParameterNames
+                                RequestParameters.body = body
                             }
 
                         let allResponses = seq {
@@ -1022,8 +1171,10 @@ let generateRequestGrammar (swaggerDocs:Types.ApiSpecFuzzingConfig list)
                                 let headerResponseSchema =
                                     r.Value.Headers
                                     |> Seq.map (fun h -> let headerSchema =
-                                                             generateGrammarElementForSchema h.Value (None, false) false
+                                                             generateGrammarElementForSchema h.Value (None, false)
+                                                                                             (false, config.JsonPropertyMaxDepth)
                                                                                              (true (*isRequired*), false (*isReadOnly*)) []
+                                                                                             schemaCache
                                                                                              id
                                                          h.Key, headerSchema)
                                     |> Seq.toList
@@ -1031,8 +1182,10 @@ let generateRequestGrammar (swaggerDocs:Types.ApiSpecFuzzingConfig list)
                                 let bodyResponseSchema =
                                     if isNull r.Value.ActualResponse.Schema then None
                                     else
-                                        generateGrammarElementForSchema r.Value.ActualResponse.Schema (None, false) false
+                                        generateGrammarElementForSchema r.Value.ActualResponse.Schema (None, false)
+                                                                        (false, config.JsonPropertyMaxDepth)
                                                                         (true (*isRequired*), false (*isReadOnly*)) []
+                                                                        schemaCache
                                                                         id
                                         |> Some
                                 {| bodyResponse = bodyResponseSchema
@@ -1134,16 +1287,18 @@ let generateRequestGrammar (swaggerDocs:Types.ApiSpecFuzzingConfig list)
 
 
     logTimingInfo "Getting dependencies..."
-    let dependenciesIndex, newDictionary = Restler.Dependencies.extractDependencies
-                                            requestData
-                                            globalAnnotations
-                                            dictionary
-                                            config.ResolveQueryDependencies
-                                            config.ResolveBodyDependencies
-                                            config.AllowGetProducers
-                                            config.DataFuzzing
-                                            perResourceDictionaries
-                                            config.ApiNamingConvention
+    let dependenciesIndex, orderingConstraints, newDictionary =
+        Restler.Dependencies.extractDependencies
+                requestData
+                globalAnnotations
+                dictionary
+                config.ResolveQueryDependencies
+                config.ResolveBodyDependencies
+                config.ResolveHeaderDependencies
+                config.AllowGetProducers
+                config.DataFuzzing
+                perResourceDictionaries
+                config.ApiNamingConvention
 
     logTimingInfo "Generating request primitives..."
 
@@ -1153,7 +1308,7 @@ let generateRequestGrammar (swaggerDocs:Types.ApiSpecFuzzingConfig list)
         |> Seq.concat
         |> Seq.toList
 
-    let responseParsers = getResponseParsers dependencies
+    let dependencyInfo = getResponseParsers dependencies orderingConstraints
 
     let basePath = swaggerDocs.[0].swaggerDoc.BasePath
     let host = swaggerDocs.[0].swaggerDoc.Host
@@ -1162,19 +1317,16 @@ let generateRequestGrammar (swaggerDocs:Types.ApiSpecFuzzingConfig list)
     let requests, newDictionary =
         requestData
         |> Seq.mapFold ( fun currentDict (requestId, rd) ->
-                            let responseParser =
-                                match responseParsers.TryGetValue(requestId) with
-                                | (true, v ) -> Some v
-                                | (false, _ ) -> None
                             generateRequestPrimitives
                                 requestId
-                                responseParser
+                                (dependencyInfo |> Map.tryFind requestId)
                                 rd.requestParameters
                                 dependenciesIndex
                                 basePath
                                 host
                                 config.ResolveQueryDependencies
                                 config.ResolveBodyDependencies
+                                config.ResolveHeaderDependencies
                                 currentDict
                                 rd.requestMetadata
                         ) newDictionary
@@ -1204,26 +1356,12 @@ let generateRequestGrammar (swaggerDocs:Types.ApiSpecFuzzingConfig list)
                         { ExamplePath.path = endpoint
                           ExamplePath.methods = methods |> Seq.map snd |> Seq.toList })
 
-    // Make sure the grammar will be stable by sorting elements as required before returning it.
     let requests =
         requests |> Seq.map (fun req ->
-                                    // Writer variables should be ordered by identifier name
-                                    let responseParser =
-                                        match req.responseParser with
-                                        | None -> None
-                                        | Some rp ->
-                                            Some ({ rp with writerVariables =
-                                                                rp.writerVariables
-                                                                |> List.sortBy (fun writerVariable ->
-                                                                                    writerVariable.requestId.endpoint,
-                                                                                    writerVariable.requestId.method,
-                                                                                    writerVariable.accessPathParts.getJsonPointer().Value) } )
-                                    let req =
-                                        match req.id.xMsPath with
-                                        | None -> req
-                                        | Some xMsPath -> XMsPaths.replaceWithOriginalPaths req
-                                    { req with responseParser = responseParser })
-                |> Seq.toList
+                                match req.id.xMsPath with
+                                | None -> req
+                                | Some xMsPath -> XMsPaths.replaceWithOriginalPaths req)
+                 |> Seq.toList
 
     { Requests = requests },
     dependencies,

@@ -72,6 +72,7 @@ module CodeGenerator =
 
                     method = OperationMethod.Get
                     path = pathPayload
+                    basePath = ""
                     queryParameters = [(ParameterPayloadSource.Examples, ParameterList [{ name = "page"; payload = q1; serialization = None}
                                                                                         { name = "payload"; payload = q2; serialization = None}])]
                     bodyParameters =  [ParameterPayloadSource.Examples, (ParameterList [{ name = "thebody"; payload = b1; serialization = None}]) ]
@@ -81,8 +82,7 @@ module CodeGenerator =
                                ("Host", "fromSwagger")
                                ("Content-Type", "application/json")]
                     token = (TokenKind.Static "SpringfieldToken: 12345")
-                    responseParser = None
-                    inputDynamicObjectVariables = []
+                    dependencyData = None
                     requestMetadata = { isLongRunningOperation = false }
                 }
             let elements = Restler.CodeGenerator.Python.getRequests [request] true

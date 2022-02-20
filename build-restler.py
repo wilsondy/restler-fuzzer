@@ -111,34 +111,40 @@ def publish_engine_py(dirs):
     Will also do a quick compilation of the files to verify that no exception occurs
 
     """
+    def print_compilation_errors(text):
+        errors = get_compilation_errors(text)
+        if errors:
+            print("Compilation errors found.")
+            for err in errors:
+                print("\nError found!\n")
+                print(err.replace('\\r\\n', '\r\n'))
+
     # Copy files to a build directory to test for basic compilation failure
     print("Testing compilation of Python files...")
     try:
         copy_python_files(dirs.repository_root_dir, dirs.engine_build_dir)
-
-        output = subprocess.run(f'{dirs.python_path} -m compileall {dirs.engine_build_dir}', shell=True, capture_output=True)
-        if output.stderr:
+        try:
+            completed_process = subprocess.run(f'{dirs.python_path} -m compileall -q {dirs.engine_build_dir}', shell=True, capture_output=True, check=True)
+        except subprocess.CalledProcessError as e:
             print("Build failed!")
-            print(output.stderr)
+            print(f"Exit code: {e.returncode}")
+            if len(e.stderr) > 0:
+                print(e.stderr)
+            print_compilation_errors(f"{e.stdout}")
             sys.exit(-1)
-
-        stdout = str(output.stdout)
-        errors = get_compilation_errors(stdout)
-        if errors:
-            for err in errors:
-                print("\nError found!\n")
-                print(err.replace('\\r\\n', '\r\n'))
-            print("Build failed!")
-            sys.exit(-1)
-
+        output=f"{completed_process.stdout}"
+        errors = get_compilation_errors(output)
+        if (len(errors) > 0):
+            print_compilation_errors(output)
+            sys.exit(1)
     finally:
-        print("Removing compilation build directory...")
+        print("Removing engine compilation build directory...")
         shutil.rmtree(dirs.engine_build_dir)
 
     # Copy files to drop
     copy_python_files(dirs.repository_root_dir, dirs.engine_dest_dir)
 
-def publish_dotnet_apps(dirs, configuration):
+def publish_dotnet_apps(dirs, configuration, dotnet_package_source):
     """ Publishes the dotnet components (compiler, driver, and results analyzer)
 
     @param dirs: The global directories
@@ -160,15 +166,25 @@ def publish_dotnet_apps(dirs, configuration):
         proj_file_path = dotnetcore_projects[target_dir_name]
         print(f"Publishing project {proj_file_path} to output dir {proj_output_dir}")
 
-        output = subprocess.run(f"dotnet restore \"{proj_file_path}\" --use-lock-file --locked-mode --force", shell=True, stderr=subprocess.PIPE)
-        if output.stderr:
+        restore_args = f"dotnet restore \"{proj_file_path}\" --use-lock-file --locked-mode --force"
+        if dotnet_package_source is not None:
+            restore_args = f"{restore_args} -s {dotnet_package_source}"
+        try:
+            subprocess.run(restore_args, shell=True, stderr=subprocess.PIPE, check=True)
+        except subprocess.CalledProcessError as e:
             print("Build failed!")
-            print(str(output.stderr))
+            print(f"Exit code: {e.returncode}")
+            if len(e.stderr) > 0:
+                print(e.stderr)
+
             sys.exit(-1)
-        output = subprocess.run(f"dotnet publish \"{proj_file_path}\" --no-restore -o \"{proj_output_dir}\" -c {configuration} -f netcoreapp5.0", shell=True, stderr=subprocess.PIPE)
-        if output.stderr:
+        try:
+            subprocess.run(f"dotnet publish \"{proj_file_path}\" --no-restore -o \"{proj_output_dir}\" -c {configuration} -f netcoreapp5.0", shell=True, stderr=subprocess.PIPE, check=True)
+        except subprocess.CalledProcessError as e:
             print("Build failed!")
-            print(str(output.stderr))
+            print(f"Exit code: {e.returncode}")
+            if len(e.stderr) > 0:
+                print(e.stderr)
             sys.exit(-1)
 
 if __name__ == '__main__':
@@ -193,6 +209,9 @@ if __name__ == '__main__':
                         'compiler: compiler only\n'
                         '(Default: all)',
                         type=str, default='all', required=False)
+    parser.add_argument('--dotnet_package_source',
+                        help='Overrides the dotnet package source. (Default: none)',
+                        type=str, default=None, required=False)
 
     args = parser.parse_args()
 
@@ -203,10 +222,10 @@ if __name__ == '__main__':
 
     print("Generating a new RESTler binary drop...")
     if args.compile_type == 'all':
-        publish_dotnet_apps(dirs, args.configuration)
+        publish_dotnet_apps(dirs, args.configuration, args.dotnet_package_source)
         publish_engine_py(dirs)
     elif args.compile_type == 'compiler':
-        publish_dotnet_apps(dirs, args.configuration)
+        publish_dotnet_apps(dirs, args.configuration, args.dotnet_package_source)
     elif args.compile_type == 'engine':
         publish_engine_py(dirs)
     else:

@@ -18,6 +18,7 @@ from copy import copy
 from engine.bug_bucketing import BugBuckets
 import engine.dependencies as dependencies
 import engine.core.requests as requests
+from engine.core.requests import FailureInformation
 import engine.core.sequences as sequences
 from engine.core.fuzzing_monitor import Monitor
 from engine.core.request_utilities import str_to_hex_def
@@ -64,6 +65,7 @@ class PayloadBodyChecker(CheckerBase):
         self._size_dep_budget = True
         self._setup_done = False
         self._use_feedback = True
+        self._skip_uuid_substitution = False
         self._current_task_tag = ''
         self._fuzzed_requests = set()
         self._buckets = PayloadBodyBuckets()
@@ -82,6 +84,7 @@ class PayloadBodyChecker(CheckerBase):
         self._start_with_examples = set_var(self._start_with_examples, 'start_with_examples')
         self._size_dep_budget = set_var(self._size_dep_budget, 'size_dep_budget')
         self._use_feedback = set_var(self._use_feedback, 'use_feedback')
+        self._skip_uuid_substitution = set_var(self._skip_uuid_substitution, 'skip_uuid_substitution')
         self._fixed_budget_max_combination = set_var(self._fixed_budget_max_combination, 'fixed_budget_max_combination')
         self._fixed_budget_pipeline_width = set_var(self._fixed_budget_pipeline_width, 'fixed_budget_pipeline_width')
         self._recipe_file = Settings().get_checker_arg(
@@ -115,12 +118,14 @@ class PayloadBodyChecker(CheckerBase):
             self._log(f'start with examples {self._start_with_examples}')
             self._log(f'size dep budget {self._size_dep_budget}')
             self._log(f'use feedback {self._use_feedback}')
+            self._log(f'skip_uuid_substitution {self._skip_uuid_substitution}')
             self._log(f'recipe {self._recipe_file}')
 
             # finish one-time setup
             self._setup_done = True
 
-        if not rendered_sequence.sequence or\
+        if rendered_sequence.sequence is None or\
+        rendered_sequence.failure_info == FailureInformation.SEQUENCE or\
         (rendered_sequence.valid and not self._fuzz_valid) or\
         (not rendered_sequence.valid and not self._fuzz_invalid):
             return
@@ -1133,37 +1138,69 @@ class PayloadBodyChecker(CheckerBase):
             # render the data
             rendered_data = seq.resolve_dependencies(rendered_data)
 
-            # substitute if there is UUID suffix
-            original_rendered_data = rendered_data
-            uuid4_suffix_dict = self._get_custom_payload_uuid4_suffix()
-            for uuid4_suffix in uuid4_suffix_dict:
-                suffix = uuid4_suffix_dict[uuid4_suffix]
-                len_suffix = len(suffix)
-                # need the query to partition path and body
+            if not self._skip_uuid_substitution:
+                # substitute if there is UUID suffix
+                original_rendered_data = rendered_data
+                uuid4_suffix_dict = self._get_custom_payload_uuid4_suffix()
                 try:
+                    # need the query to partition path and body;
+                    # everything before '?' is treated as the path
                     partition = rendered_data.index('?')
-                    if suffix in rendered_data[:partition]:
-                        new_val_start = rendered_data[:partition].index(suffix)
-                        if new_val_start + len_suffix + 10 > partition:
-                            self._log('unexpected uuid')
-                            continue
-                        new_val = rendered_data[new_val_start:
-                                                new_val_start + len_suffix + 10]
 
-                        # find all occurence in the body
-                        suffix_in_body = [
-                            m.start() for m in re.finditer(suffix, rendered_data)
-                        ][1:]
-                        for si in suffix_in_body:
-                            old_val = rendered_data[si: si + len_suffix + 10]
-                            rendered_data = rendered_data.replace(
-                                old_val, new_val)
+                    # If an auth-token is used, it should NEVER be modified;
+                    # hence, compute the start_body position after the token
+                    start_body = partition + 1
+                    partition2 = rendered_data.find('Authorization: Bearer')
+                    if partition2 != -1:
+                        # search for '\r\n' at the end of the token
+                        partition3 = rendered_data[partition2:].index('\r\n')
+                        start_body = partition2 + partition3 + 6
+
+                    # Bug: tries all the uuid suffixes in the dictionary
+                    # even though this payload may not contain most of them
+                    for uuid4_suffix in uuid4_suffix_dict:
+                        suffix = uuid4_suffix_dict[uuid4_suffix]
+                        len_suffix = len(suffix)
+
+                        # If the suffix is present in the path
+                        # Bug: the code below assumes the path ends with the suffix
+                        # and the suffix is unique, i.e. does not occur twice in the path;
+                        # this cannot be assumed, since the user can make the suffix any value
+                        if suffix in rendered_data[:partition]:
+                            new_val_start = rendered_data[:partition].index(suffix)
+                            if new_val_start + len_suffix + 10 > partition:
+                                self._log('unexpected uuid')
+                                continue
+                            new_val = rendered_data[new_val_start:new_val_start + len_suffix + 10]
+
+                            new_body = rendered_data[start_body:]
+                            # find all occurence in the body
+                            suffix_in_body = [
+                                # Bug: Finds all occurrences of *the value text string* of suffix in the
+                                # payload and does replacement
+                                # Instead, should search in the grammar for the 'restler_custom_payload_uuid_suffix' and
+                                # replace with new rendered value
+                                # Note: the replacement done below can be incorrect in 2 ways in an example like this:
+                                #   Ex: "name":"Standard" will be replaced by "nameaa1e45cbb5d"
+                                # 1. the right-hand-side should be replaced, not the left-hand-side in a case like this
+                                # 2. the length of old_val should be the length of suffix, not the length of new_val
+                                m.start() for m in re.finditer(suffix, new_body)
+                            ]
+                            for si in suffix_in_body:
+                                old_val = new_body[si: si + len_suffix + 10]
+                                new_body = new_body.replace(old_val, new_val)
+                            # replace the old body with the new_body
+                            rendered_data = rendered_data[:start_body] + new_body
                 except Exception:
                     rendered_data = original_rendered_data
 
-            # send out the request
+            # send out the request and parse the response
             response = self._send_request(parser, rendered_data)
-            request_utilities.call_response_parser(parser, response)
+            async_wait = Settings().get_max_async_resource_creation_time(request.request_id)
+            responses_to_parse, _, _ = async_request_utilities.try_async_poll(
+                rendered_data, response, async_wait)
+            request_utilities.call_response_parser(parser, None, responses=responses_to_parse)
+
             self._set_refresh_req(request, response)
 
             if not response or not response.status_code:

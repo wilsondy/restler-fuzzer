@@ -54,6 +54,8 @@
 
 * *ResolveQueryDependencies* has the same behavior as ResolveBodyDependencies, but for query parameters.
 
+* *ResolveHeaderDependencies* has the same behavior as ResolveBodyDependencies, but for header parameters.
+
 * *EngineSettingsFilePath* is the path to the RESTler engine settings file.  This argument is optional.  If specified, the contents of the engine settings may be updated during compilation, and the updated version is placed in the output directory.  This updated version should be used when fuzzing.
 
 * *DiscoverExamples* If true, any examples found in the Swagger specification are
@@ -70,6 +72,38 @@ the compiler looks for a default file named ```examples.json``` in the specified
 directory.  If *DiscoverExamples* is false, every time an example is used
 in the Swagger file, RESTler will first look for it in metadata,
 and, if found, the externally specified example will override the example from the specification.
+
+    See /docs/user-guide/Examples.md for a description of the file format.
+If this setting is not specified, and *DiscoverExamples* is set to ```false```,
+the compiler looks for a default file named ```examples.json``` in the specified examples
+directory.  If *DiscoverExamples* is false, every time an example is used
+in the Swagger file, RESTler will first look for it in metadata,
+and, if found, the externally specified example will override the example from the specification.
+
+
+* *ExampleConfigFiles* is a setting that allows specifying several example config files
+(files in which example parameter payload metadata is located), plus additional settings.
+The currently supported settings are:
+```
+  "ExampleConfigFiles": [
+    {
+      "filePath": "C:\\examples_1.json",
+      "exactCopy": false
+    },
+    {
+      "filePath": "C:\\examples_2.json",
+      "exactCopy": true
+    },
+  ]
+```
+
+- ```filePath``` is the path to the file containing metadata about example parameter payloads
+- ```exactCopy``` specifies whether the example values should be merged with the schema and dictionary.  ```exactCopy``` is ```false``` by default.  When set to ```true```, constants from the example will be taken and override any other possible value (for example, custom payloads from the dictionary will not be used).  Note: parameters that are not in the specification but appear in the example are ignored.
+
+* *UseAllExamplePayloads* When set to ```true```, all available example payloads are used (currently, both
+the ones referenced in the specification and the ones
+specified by the user in one or more example config files). ```False``` by default (the user-specified examples override
+the ones from the specification).
 
 * *ExamplesDirectory* is the directory where the compiler will copy example payloads
 found in the Swagger file if *DiscoverExamples* is set to ```true```.
@@ -100,3 +134,8 @@ catch consistency bugs in the specification because producer-consumer dependenci
 * *TrackFuzzedParameterNames* False by default.  When true, every fuzzable primitive will
 include an additional parameter `param_name` which is the name of the property or
 parameter being fuzzed.  These will be used to capture fuzzed parameters in ```tracked_parameters``` in the spec coverage file.
+
+* *JsonPropertyMaxDepth* is the maximum depth for Json properties in the schema to test.
+Any properties exceeding this depth are removed.  There is no maximum by default.
+
+* *IncludeOptionalParameters* True by default.  When false, RESTler will only pass required parameters when trying to successfully exercise each request.  The full schema including optional parameters is always included in the json grammar, so optional parameters will still be fuzzed by the payload body checker and available to test with ```test_combinations_settings``` when this option is set to false.

@@ -25,6 +25,8 @@ If you use RESTler in your research, please cite the (default) ICSE'2019 paper (
 
 RESTler was created at Microsoft Research and is still under active development.
 
+For an overview and demo on how to get started, see [Webinar - Fuzzing to Improve the Security and Reliability of Cloud Services](https://www.youtube.com/watch?v=FYmiPoRwEbE).
+
 ![RESTler architecture](./docs/user-guide/RESTler-arch.png)
 
 ## Build Status
@@ -37,6 +39,16 @@ RESTler was created at Microsoft Research and is still under active development.
 RESTler was designed to run on 64-bit machines with Windows or Linux.  Experimental support for macOS is also enabled.
 
 ### **Build instructions**
+
+#### Docker
+
+In the root of this repo, run
+
+```shell
+docker build -t restler .
+```
+
+#### Local
 
 Prerequisites: Install [Python 3.8.2](https://www.python.org/downloads/) and
 [.NET 5.0](https://dotnet.microsoft.com/download/dotnet-core?utm_source=getdotnetcorecli&utm_medium=referral), for your appropriate OS.
