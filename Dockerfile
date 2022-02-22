@@ -1,5 +1,7 @@
 FROM mcr.microsoft.com/dotnet/sdk:5.0-alpine as builder
 
+#For Token code - doesn't belong here obviously.
+RUN apk --update add nodejs npm
 RUN apk add --no-cache python3 py3-pip
 RUN ln -s /usr/bin/python3 /usr/bin/python
 
