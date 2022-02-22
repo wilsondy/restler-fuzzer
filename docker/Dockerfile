@@ -3,6 +3,9 @@ FROM mcr.microsoft.com/dotnet/aspnet:5.0-alpine
 COPY ./compiler /RESTler/compiler
 COPY ./restler /RESTler/restler
 
+#For Token code - doesn't belong here obviously.
+RUN apk --update add nodejs npm
+
 #Get the source code for the engine, and
 #copy source code to the image
 #RESTler Python dependency
